@@ -1,0 +1,316 @@
+# =============================================================================
+# ANSIBLE PLAYBOOK: JENKINS SERVER HARDENING
+# =============================================================================
+# This playbook applies security hardening to the Jenkins server
+#
+# Security Controls Implemented:
+# - SSH hardening (disable root login, password auth)
+# - System updates and security patches
+# - Firewall configuration
+# - User privilege management
+# - Audit logging
+# - Jenkins security configuration
+#
+# Enterprise Relevance:
+# - CIS Benchmark compliance
+# - Automated security configuration
+# - Idempotent operations (safe to re-run)
+# - Audit trail via Ansible Tower/AWX
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbooks/harden-jenkins.yaml
+# =============================================================================
+
+---
+- name: Harden Jenkins Server
+  hosts: jenkins
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # SSH configuration
+    ssh_port: 22
+    ssh_permit_root_login: "no"
+    ssh_password_authentication: "no"
+    ssh_max_auth_tries: 3
+    ssh_client_alive_interval: 300
+    ssh_client_alive_count_max: 2
+
+    # Jenkins configuration
+    jenkins_home: /var/lib/jenkins
+    jenkins_user: jenkins
+    jenkins_http_port: 8080
+
+    # Allowed admin users (add your admin usernames)
+    admin_users:
+      - jenkinsadmin
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh
+        state: restarted
+
+    - name: restart jenkins
+      service:
+        name: jenkins
+        state: restarted
+
+    - name: reload ufw
+      command: ufw reload
+
+  tasks:
+    # =========================================================================
+    # SYSTEM UPDATES
+    # =========================================================================
+    - name: System Updates
+      block:
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+            cache_valid_time: 3600
+          tags: [updates]
+
+        - name: Upgrade all packages
+          apt:
+            upgrade: safe
+          tags: [updates]
+
+        - name: Install security updates
+          apt:
+            name:
+              - unattended-upgrades
+              - apt-listchanges
+            state: present
+          tags: [updates]
+
+        - name: Enable automatic security updates
+          copy:
+            dest: /etc/apt/apt.conf.d/20auto-upgrades
+            content: |
+              APT::Periodic::Update-Package-Lists "1";
+              APT::Periodic::Unattended-Upgrade "1";
+              APT::Periodic::AutocleanInterval "7";
+            mode: '0644'
+          tags: [updates]
+
+    # =========================================================================
+    # SSH HARDENING
+    # =========================================================================
+    - name: SSH Hardening
+      block:
+        - name: Configure SSH daemon
+          template:
+            src: templates/sshd_config.j2
+            dest: /etc/ssh/sshd_config
+            owner: root
+            group: root
+            mode: '0600'
+            validate: '/usr/sbin/sshd -t -f %s'
+          notify: restart ssh
+          tags: [ssh]
+
+        - name: Ensure SSH is enabled and running
+          service:
+            name: ssh
+            state: started
+            enabled: yes
+          tags: [ssh]
+
+    # =========================================================================
+    # USER MANAGEMENT
+    # =========================================================================
+    - name: User Management
+      block:
+        - name: Ensure root login is disabled
+          user:
+            name: root
+            password_lock: yes
+          tags: [users]
+
+        - name: Create admin group
+          group:
+            name: admins
+            state: present
+          tags: [users]
+
+        - name: Add admin users to sudo group
+          user:
+            name: "{{ item }}"
+            groups: sudo,admins
+            append: yes
+          loop: "{{ admin_users }}"
+          tags: [users]
+
+        - name: Configure sudoers for admin group
+          lineinfile:
+            path: /etc/sudoers.d/admins
+            line: '%admins ALL=(ALL) NOPASSWD:ALL'
+            create: yes
+            mode: '0440'
+            validate: '/usr/sbin/visudo -cf %s'
+          tags: [users]
+
+    # =========================================================================
+    # FIREWALL CONFIGURATION
+    # =========================================================================
+    - name: Firewall Configuration
+      block:
+        - name: Install UFW
+          apt:
+            name: ufw
+            state: present
+          tags: [firewall]
+
+        - name: Set UFW default policies
+          ufw:
+            direction: "{{ item.direction }}"
+            policy: "{{ item.policy }}"
+          loop:
+            - { direction: 'incoming', policy: 'deny' }
+            - { direction: 'outgoing', policy: 'allow' }
+          tags: [firewall]
+
+        - name: Allow SSH
+          ufw:
+            rule: allow
+            port: "{{ ssh_port }}"
+            proto: tcp
+          tags: [firewall]
+
+        - name: Allow Jenkins HTTP
+          ufw:
+            rule: allow
+            port: "{{ jenkins_http_port }}"
+            proto: tcp
+          tags: [firewall]
+
+        - name: Enable UFW
+          ufw:
+            state: enabled
+          tags: [firewall]
+
+    # =========================================================================
+    # AUDIT LOGGING
+    # =========================================================================
+    - name: Audit Logging
+      block:
+        - name: Install auditd
+          apt:
+            name:
+              - auditd
+              - audispd-plugins
+            state: present
+          tags: [audit]
+
+        - name: Configure audit rules
+          copy:
+            dest: /etc/audit/rules.d/hardening.rules
+            content: |
+              # Monitor sudo usage
+              -w /etc/sudoers -p wa -k sudoers_changes
+              -w /etc/sudoers.d/ -p wa -k sudoers_changes
+
+              # Monitor SSH configuration
+              -w /etc/ssh/sshd_config -p wa -k sshd_config
+
+              # Monitor user/group changes
+              -w /etc/passwd -p wa -k passwd_changes
+              -w /etc/group -p wa -k group_changes
+
+              # Monitor login events
+              -w /var/log/faillog -p wa -k login_events
+              -w /var/log/lastlog -p wa -k login_events
+
+              # Monitor Jenkins
+              -w /var/lib/jenkins -p wa -k jenkins_changes
+            mode: '0640'
+          notify: restart auditd
+          tags: [audit]
+
+        - name: Enable auditd
+          service:
+            name: auditd
+            state: started
+            enabled: yes
+          tags: [audit]
+
+      handlers:
+        - name: restart auditd
+          service:
+            name: auditd
+            state: restarted
+
+    # =========================================================================
+    # JENKINS INSTALLATION
+    # =========================================================================
+    - name: Jenkins Installation
+      block:
+        - name: Add Jenkins apt key
+          apt_key:
+            url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+            state: present
+          tags: [jenkins]
+
+        - name: Add Jenkins repository
+          apt_repository:
+            repo: 'deb https://pkg.jenkins.io/debian-stable binary/'
+            state: present
+            filename: jenkins
+          tags: [jenkins]
+
+        - name: Install Jenkins
+          apt:
+            name: jenkins
+            state: present
+            update_cache: yes
+          tags: [jenkins]
+
+        - name: Configure Jenkins security settings
+          lineinfile:
+            path: /etc/default/jenkins
+            regexp: '^JAVA_ARGS='
+            line: 'JAVA_ARGS="-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false"'
+          notify: restart jenkins
+          tags: [jenkins]
+
+        - name: Ensure Jenkins is running
+          service:
+            name: jenkins
+            state: started
+            enabled: yes
+          tags: [jenkins]
+
+        - name: Wait for Jenkins to start
+          wait_for:
+            port: "{{ jenkins_http_port }}"
+            delay: 10
+            timeout: 300
+          tags: [jenkins]
+
+    # =========================================================================
+    # FINAL SECURITY CHECKS
+    # =========================================================================
+    - name: Security Verification
+      block:
+        - name: Check SSH configuration
+          command: sshd -T
+          register: sshd_config
+          changed_when: false
+          tags: [verify]
+
+        - name: Verify root login is disabled
+          assert:
+            that:
+              - "'permitrootlogin no' in sshd_config.stdout"
+            fail_msg: "Root login is not disabled!"
+            success_msg: "Root login is disabled"
+          tags: [verify]
+
+        - name: Verify password authentication is disabled
+          assert:
+            that:
+              - "'passwordauthentication no' in sshd_config.stdout"
+            fail_msg: "Password authentication is not disabled!"
+            success_msg: "Password authentication is disabled"
+          tags: [verify]

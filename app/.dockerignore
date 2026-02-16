@@ -1,0 +1,103 @@
+# =============================================================================
+# DOCKER IGNORE FILE
+# =============================================================================
+# Security Purpose: Prevent sensitive files from being included in image
+# This reduces image size and prevents accidental secret exposure
+# =============================================================================
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing
+tests/
+test_*.py
+*_test.py
+conftest.py
+.coverage
+coverage.xml
+*.cover
+.hypothesis/
+
+# Documentation
+docs/
+*.md
+*.rst
+*.txt
+!requirements.txt
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+azure-pipelines.yml
+
+# Docker
+Dockerfile*
+docker-compose*
+.docker/
+
+# Kubernetes
+k8s/
+*.yaml
+*.yml
+!requirements.txt
+
+# Security - NEVER include these
+.env*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+.aws/
+.azure/
+kubeconfig
+*.tfvars
+*.tfstate*
+
+# Development
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

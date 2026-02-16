@@ -1,0 +1,93 @@
+#------------------------------------------------------------------------------
+# TERRAFORM VARIABLES - EXAMPLE FILE
+#------------------------------------------------------------------------------
+# Copy this file to terraform.tfvars and update with your values
+# IMPORTANT: terraform.tfvars should be added to .gitignore
+#
+# Required: Variables marked with [REQUIRED] must be set
+# Optional: Variables with defaults can be overridden as needed
+#------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
+# GLOBAL CONFIGURATION
+#------------------------------------------------------------------------------
+
+project_name = "seccloud"      # 3-12 lowercase alphanumeric characters
+environment  = "prod"          # prod, staging, or dev
+location     = "eastus"        # Azure region
+
+# Additional tags (optional)
+tags = {
+  CostCenter = "Security-Portfolio"
+  Owner      = "Your-Name"
+}
+
+#------------------------------------------------------------------------------
+# ACCESS CONTROL [REQUIRED]
+#------------------------------------------------------------------------------
+# Your public IP addresses for administrative access
+# Find your IP: curl ifconfig.me
+
+admin_ip_addresses = [
+  "YOUR_PUBLIC_IP/32"  # Replace with your IP, e.g., "203.0.113.50/32"
+]
+
+# Additional IPs for AKS API access (optional)
+aks_authorized_ip_ranges = []
+
+#------------------------------------------------------------------------------
+# NETWORK CONFIGURATION (Optional - defaults provided)
+#------------------------------------------------------------------------------
+
+# vnet_address_space = ["10.0.0.0/16"]
+
+# subnet_prefixes = {
+#   aks    = "10.0.1.0/24"
+#   appgw  = "10.0.2.0/24"
+#   data   = "10.0.3.0/24"
+#   mgmt   = "10.0.4.0/24"
+#   acr    = "10.0.5.0/24"
+# }
+
+#------------------------------------------------------------------------------
+# AKS CONFIGURATION (Optional - defaults provided)
+#------------------------------------------------------------------------------
+
+# aks_kubernetes_version = "1.28"
+# aks_node_vm_size       = "Standard_B2s"
+# aks_node_count         = 2
+# aks_enable_auto_scaling = true
+# aks_min_node_count     = 2
+# aks_max_node_count     = 4
+
+#------------------------------------------------------------------------------
+# SQL DATABASE [REQUIRED]
+#------------------------------------------------------------------------------
+# SQL admin credentials - use strong, unique values
+
+sql_admin_username = "sqladmin"                    # Cannot be: admin, administrator, sa, root
+sql_admin_password = "CHANGE_ME_Strong_P@ssw0rd!"  # Minimum 16 characters
+
+# sql_database_sku = "S0"  # Basic, S0, S1, P1, etc.
+
+#------------------------------------------------------------------------------
+# JENKINS CONFIGURATION (Optional - defaults provided)
+#------------------------------------------------------------------------------
+
+# jenkins_vm_size       = "Standard_B2s"
+# jenkins_admin_username = "jenkinsadmin"
+
+#------------------------------------------------------------------------------
+# KEY VAULT CONFIGURATION (Optional - defaults provided)
+#------------------------------------------------------------------------------
+
+# keyvault_sku = "standard"  # standard or premium (HSM-backed)
+
+#------------------------------------------------------------------------------
+# APPLICATION GATEWAY CONFIGURATION (Optional - defaults provided)
+#------------------------------------------------------------------------------
+
+# appgw_sku_name    = "Standard_v2"  # Standard_v2 or WAF_v2
+# appgw_sku_tier    = "Standard_v2"
+# appgw_min_capacity = 1
+# appgw_max_capacity = 2

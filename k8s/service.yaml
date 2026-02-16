@@ -1,0 +1,56 @@
+# =============================================================================
+# KUBERNETES SERVICE
+# =============================================================================
+# ClusterIP service for internal communication
+# Application Gateway connects to this via AKS internal load balancer
+#
+# Security Considerations:
+# - No NodePort exposure (reduces attack surface)
+# - No LoadBalancer type (traffic goes through Application Gateway)
+# - Internal traffic only
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-api
+  namespace: secure-app
+  labels:
+    app: secure-api
+  annotations:
+    # Service description for documentation
+    description: "Internal service for secure-api deployment"
+spec:
+  type: ClusterIP
+  selector:
+    app: secure-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+---
+# =============================================================================
+# HEADLESS SERVICE FOR POD DNS
+# =============================================================================
+# Enables direct pod-to-pod communication with stable DNS names
+# Useful for debugging and service mesh integration
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-api-headless
+  namespace: secure-app
+  labels:
+    app: secure-api
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service
+  selector:
+    app: secure-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

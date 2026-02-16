@@ -1,0 +1,162 @@
+# =============================================================================
+# GIT IGNORE FILE
+# =============================================================================
+# Security: Prevents sensitive files from being committed to version control
+# =============================================================================
+
+# =============================================================================
+# SECRETS AND CREDENTIALS (CRITICAL - NEVER COMMIT)
+# =============================================================================
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.env
+*.env.*
+.env*
+secrets/
+credentials/
+*credentials*
+*secret*
+*.tfvars
+!*.tfvars.example
+
+# Azure credentials
+.azure/
+azure.json
+serviceprincipal.json
+
+# Kubernetes configs with credentials
+kubeconfig
+.kube/
+
+# SSH keys
+id_rsa*
+id_ed25519*
+*.pub
+jenkins_key*
+
+# =============================================================================
+# TERRAFORM
+# =============================================================================
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform plan files
+*.tfplan
+tfplan
+
+# =============================================================================
+# ANSIBLE
+# =============================================================================
+*.retry
+ansible.log
+.vault_pass
+vault_password
+inventory.ini
+!inventory.ini.example
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.egg-info/
+*.egg
+
+# =============================================================================
+# IDE AND EDITORS
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-*
+.history/
+
+# =============================================================================
+# OS FILES
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# BUILD ARTIFACTS
+# =============================================================================
+build/
+dist/
+*.egg-info/
+node_modules/
+.npm/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# DOCKER
+# =============================================================================
+.docker/
+
+# =============================================================================
+# TESTING
+# =============================================================================
+coverage/
+*.cover
+.coverage.*
+htmlcov/
+.hypothesis/
+junit*.xml
+test-results/
+
+# =============================================================================
+# TEMPORARY FILES
+# =============================================================================
+*.tmp
+*.temp
+*.bak
+*.backup
+tmp/
+temp/
+
+# =============================================================================
+# SECURITY SCAN REPORTS (keep for CI but not in repo)
+# =============================================================================
+trivy-report.json
+bandit-report.json
+dependency-audit.json
+security-scan-results/

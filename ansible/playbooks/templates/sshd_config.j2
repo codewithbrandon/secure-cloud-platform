@@ -1,0 +1,139 @@
+# =============================================================================
+# SSH SERVER CONFIGURATION - HARDENED
+# =============================================================================
+# This configuration implements CIS Benchmark recommendations for SSH
+# Managed by Ansible - do not edit manually
+# =============================================================================
+
+# ============================================================================
+# NETWORK
+# ============================================================================
+Port {{ ssh_port }}
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+# ============================================================================
+# AUTHENTICATION
+# ============================================================================
+# Disable root login - CIS 5.2.8
+PermitRootLogin {{ ssh_permit_root_login }}
+
+# Disable password authentication - use SSH keys only
+PasswordAuthentication {{ ssh_password_authentication }}
+
+# Disable empty passwords
+PermitEmptyPasswords no
+
+# Enable public key authentication
+PubkeyAuthentication yes
+
+# Disable challenge-response authentication
+ChallengeResponseAuthentication no
+
+# Disable Kerberos authentication
+KerberosAuthentication no
+
+# Disable GSSAPI authentication
+GSSAPIAuthentication no
+
+# Maximum authentication attempts - CIS 5.2.6
+MaxAuthTries {{ ssh_max_auth_tries }}
+
+# Maximum sessions per connection
+MaxSessions 10
+
+# ============================================================================
+# SECURITY
+# ============================================================================
+# Use strong ciphers only
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+
+# Use strong MACs only
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+
+# Use strong key exchange algorithms only
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+
+# Host key algorithms
+HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+
+# Disable X11 forwarding - CIS 5.2.5
+X11Forwarding no
+
+# Disable agent forwarding unless needed
+AllowAgentForwarding no
+
+# Disable TCP forwarding unless needed
+AllowTcpForwarding no
+
+# Disable user environment
+PermitUserEnvironment no
+
+# Use privilege separation
+UsePrivilegeSeparation sandbox
+
+# Strict mode for file permissions
+StrictModes yes
+
+# ============================================================================
+# SESSION
+# ============================================================================
+# Client alive settings - terminate idle sessions - CIS 5.2.13
+ClientAliveInterval {{ ssh_client_alive_interval }}
+ClientAliveCountMax {{ ssh_client_alive_count_max }}
+
+# Login grace time
+LoginGraceTime 60
+
+# Banner
+Banner /etc/ssh/banner
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+# Log level - CIS 5.2.3
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# ============================================================================
+# SUBSYSTEMS
+# ============================================================================
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# ============================================================================
+# ACCESS CONTROL
+# ============================================================================
+# Only allow specific users (uncomment and customize)
+# AllowUsers jenkinsadmin
+
+# Only allow specific groups (uncomment and customize)
+# AllowGroups admins
+
+# Deny specific users
+DenyUsers root
+
+# ============================================================================
+# PAM
+# ============================================================================
+UsePAM yes
+
+# ============================================================================
+# OTHER
+# ============================================================================
+# Disable .rhosts files
+IgnoreRhosts yes
+
+# Disable host-based authentication
+HostbasedAuthentication no
+
+# Disable DNS lookups (faster connections)
+UseDNS no
+
+# Print last log
+PrintLastLog yes
+
+# Print message of the day
+PrintMotd no
+
+# Accept locale environment variables
+AcceptEnv LANG LC_*

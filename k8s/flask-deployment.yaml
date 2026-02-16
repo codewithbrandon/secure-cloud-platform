@@ -1,0 +1,125 @@
+# Flask API Deployment
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-app
+  labels:
+    environment: production
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: secure-app
+type: Opaque
+stringData:
+  database-url: "Server=sql-seccloud-prod.database.windows.net;Database=sqldb-seccloud-prod;Uid=yourlogin;Pwd=placeholder;Encrypt=yes;TrustServerCertificate=no;"
+  flask-secret-key: "super-secret-key-change-in-production"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-api
+  namespace: secure-app
+  labels:
+    app: secure-api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: secure-api
+  template:
+    metadata:
+      labels:
+        app: secure-api
+        version: v1
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: secure-api
+          image: acrseccloudprod.azurecr.io/secure-api:v1.0.0
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: FLASK_ENV
+              value: "production"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+            - name: FLASK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: flask-secret-key
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-api
+  namespace: secure-app
+  labels:
+    app: secure-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: secure-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

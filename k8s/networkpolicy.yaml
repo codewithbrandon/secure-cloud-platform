@@ -1,0 +1,232 @@
+# =============================================================================
+# KUBERNETES NETWORK POLICIES
+# =============================================================================
+# Network policies implement micro-segmentation at the pod level
+# Default: deny all traffic, then explicitly allow required flows
+#
+# Security Implementation:
+# - Zero Trust: No implicit trust between pods
+# - Least privilege: Only allow necessary communication
+# - Defense in depth: Network layer protection
+#
+# Enterprise Relevance:
+# - Required for PCI-DSS network segmentation
+# - Prevents lateral movement after compromise
+# - Enables audit of allowed traffic flows
+#
+# Prerequisites:
+# - Network plugin that supports NetworkPolicy (Calico, Azure NPM)
+# - AKS configured with network_policy = "calico" or "azure"
+# =============================================================================
+
+# =============================================================================
+# DEFAULT DENY ALL INGRESS
+# =============================================================================
+# Block all incoming traffic by default
+# This is the foundation of Zero Trust networking
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: secure-app
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+    - Ingress
+
+---
+# =============================================================================
+# DEFAULT DENY ALL EGRESS
+# =============================================================================
+# Block all outgoing traffic by default
+# Prevents data exfiltration and C2 communication
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: secure-app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+---
+# =============================================================================
+# ALLOW INGRESS TO API FROM INGRESS CONTROLLER
+# =============================================================================
+# Allow traffic from NGINX/Application Gateway ingress controller
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-api
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from ingress controller namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# =============================================================================
+# ALLOW EGRESS TO DNS
+# =============================================================================
+# Required for DNS resolution (kube-dns/CoreDNS)
+# Without this, pods cannot resolve service names
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# =============================================================================
+# ALLOW EGRESS TO AZURE SQL
+# =============================================================================
+# Allow database connections to Azure SQL private endpoint
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-sql
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Egress
+  egress:
+    # Azure SQL port
+    - ports:
+        - protocol: TCP
+          port: 1433
+      # Allow to data subnet CIDR (private endpoint)
+      to:
+        - ipBlock:
+            cidr: 10.0.3.0/24  # Data subnet
+
+---
+# =============================================================================
+# ALLOW EGRESS TO AZURE KEY VAULT
+# =============================================================================
+# Allow HTTPS connections to Key Vault for secrets
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-keyvault
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+      # Azure service tag would be ideal, but NetworkPolicy doesn't support it
+      # In production, use Azure Firewall or NSG for service tag filtering
+
+---
+# =============================================================================
+# ALLOW EGRESS FOR PROMETHEUS METRICS SCRAPING
+# =============================================================================
+# Allow Prometheus to scrape metrics from application pods
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# =============================================================================
+# ALLOW INTERNAL POD-TO-POD COMMUNICATION
+# =============================================================================
+# Allow pods with same label to communicate (if needed for clustering)
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal-api
+  namespace: secure-app
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: secure-api
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: secure-api
+      ports:
+        - protocol: TCP
+          port: 8080

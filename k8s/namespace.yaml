@@ -1,0 +1,30 @@
+# =============================================================================
+# KUBERNETES NAMESPACE WITH SECURITY LABELS
+# =============================================================================
+# Namespaces provide logical isolation for workloads
+# Labels enable Pod Security Standards enforcement
+#
+# Security Controls:
+# - Pod Security Standards: restricted (most secure)
+# - Resource quotas prevent noisy neighbor attacks
+# - Network policies restrict traffic (applied separately)
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-app
+  labels:
+    # Pod Security Standards (PSS) - Kubernetes 1.25+
+    # Options: privileged, baseline, restricted
+    # restricted: Most secure, requires non-root, drops capabilities
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    # Custom labels for organization
+    environment: production
+    team: platform
+    cost-center: security-portfolio

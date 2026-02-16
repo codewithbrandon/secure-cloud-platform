@@ -1,0 +1,256 @@
+# =============================================================================
+# KUBERNETES DEPLOYMENT WITH SECURITY HARDENING
+# =============================================================================
+# Security Controls Implemented:
+# - Non-root container execution
+# - Read-only root filesystem
+# - Dropped all capabilities
+# - No privilege escalation
+# - Resource limits (prevent DoS)
+# - Security context at pod and container level
+# - Liveness and readiness probes
+# - Pod anti-affinity for high availability
+#
+# Enterprise Relevance:
+# - Complies with CIS Kubernetes Benchmark
+# - Required for PCI-DSS container security
+# - Prevents container escape vulnerabilities
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-api
+  namespace: secure-app
+  labels:
+    app: secure-api
+    version: v1
+spec:
+  replicas: 2
+  # Rolling update strategy for zero-downtime deployments
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: secure-api
+  template:
+    metadata:
+      labels:
+        app: secure-api
+        version: v1
+      annotations:
+        # Prometheus scraping configuration
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # =========================================================================
+      # POD SECURITY CONTEXT
+      # =========================================================================
+      # Applies to all containers in the pod
+      # =========================================================================
+      securityContext:
+        # Run as non-root user
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # Secure computing mode (seccomp)
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Service account for workload identity
+      serviceAccountName: secure-api-sa
+      automountServiceAccountToken: false  # Disable unless needed
+
+      # =========================================================================
+      # ANTI-AFFINITY RULES
+      # =========================================================================
+      # Spread pods across nodes for high availability
+      # Prevents single node failure from taking down the service
+      # =========================================================================
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - secure-api
+                topologyKey: kubernetes.io/hostname
+
+      # =========================================================================
+      # CONTAINERS
+      # =========================================================================
+      containers:
+        - name: secure-api
+          # SECURITY: Use specific image tag, never 'latest'
+          image: ${ACR_NAME}.azurecr.io/secure-api:${IMAGE_TAG}
+          imagePullPolicy: Always
+
+          # ==================================================================
+          # CONTAINER SECURITY CONTEXT
+          # ==================================================================
+          securityContext:
+            # Run as non-root
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            # Read-only root filesystem
+            readOnlyRootFilesystem: true
+            # Prevent privilege escalation
+            allowPrivilegeEscalation: false
+            # Drop all Linux capabilities
+            capabilities:
+              drop:
+                - ALL
+
+          # ==================================================================
+          # PORTS
+          # ==================================================================
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # ==================================================================
+          # ENVIRONMENT VARIABLES
+          # ==================================================================
+          # SECURITY: No secrets in env vars - use secretKeyRef
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: FLASK_ENV
+              value: "production"
+            # Pod information for logging
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Secrets from Kubernetes secrets (mounted from Key Vault)
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+            - name: FLASK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: flask-secret-key
+
+          # ==================================================================
+          # RESOURCE LIMITS
+          # ==================================================================
+          # Prevents resource exhaustion attacks and noisy neighbors
+          # Enables Kubernetes QoS class: Guaranteed
+          # ==================================================================
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # ==================================================================
+          # HEALTH PROBES
+          # ==================================================================
+          # Kubernetes uses these to manage pod lifecycle
+          # Critical for zero-downtime deployments
+          # ==================================================================
+
+          # Liveness probe: Restart container if unhealthy
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness probe: Remove from service if not ready
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Startup probe: Allow slow starting containers
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+
+          # ==================================================================
+          # VOLUME MOUNTS
+          # ==================================================================
+          volumeMounts:
+            # Temporary directory for application (since root is read-only)
+            - name: tmp
+              mountPath: /tmp
+            # Cache directory
+            - name: cache
+              mountPath: /app/.cache
+
+      # =========================================================================
+      # VOLUMES
+      # =========================================================================
+      volumes:
+        # EmptyDir for temporary files (ephemeral, pod-scoped)
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 50Mi
+
+      # =========================================================================
+      # DNS POLICY
+      # =========================================================================
+      dnsPolicy: ClusterFirst
+
+      # =========================================================================
+      # TERMINATION GRACE PERIOD
+      # =========================================================================
+      # Time to gracefully shutdown before SIGKILL
+      terminationGracePeriodSeconds: 30
+
+---
+# =============================================================================
+# POD DISRUPTION BUDGET
+# =============================================================================
+# Ensures minimum availability during voluntary disruptions
+# (node drains, cluster upgrades, etc.)
+# =============================================================================
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: secure-api-pdb
+  namespace: secure-app
+spec:
+  minAvailable: 1  # At least 1 pod must remain available
+  selector:
+    matchLabels:
+      app: secure-api

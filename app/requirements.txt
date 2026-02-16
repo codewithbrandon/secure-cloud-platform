@@ -1,0 +1,29 @@
+# Secure Cloud Platform - Flask API Dependencies
+# Pin versions to prevent supply chain attacks
+# Regularly update and audit with: pip-audit
+
+# Web Framework
+Flask==3.0.0
+Werkzeug==3.0.1
+gunicorn==21.2.0
+
+# Database
+pyodbc==5.0.1
+SQLAlchemy==2.0.23
+
+# Security
+python-dotenv==1.0.0
+
+# Health & Metrics
+prometheus-flask-exporter==0.23.0
+
+# Azure Integration
+azure-identity==1.15.0
+azure-keyvault-secrets==4.7.0
+
+# Input Validation
+marshmallow==3.20.1
+email-validator==2.1.0
+
+# Logging
+python-json-logger==2.0.7
