@@ -452,6 +452,44 @@ pipeline {
                         # Wait for rollout
                         kubectl rollout status deployment/secure-api -n ${K8S_NAMESPACE} --timeout=300s
                     """
+
+                    // Deploy monitoring stack in dependency order
+                    sh """
+                        echo '📊 Deploying monitoring stack...'
+
+                        # Namespace and storage first
+                        kubectl apply -f monitoring/monitoring-namespace.yaml
+                        kubectl apply -f monitoring/monitoring-pvc.yaml
+
+                        # Alertmanager (Prometheus fires alerts to it on startup)
+                        kubectl apply -f monitoring/alertmanager-config.yaml
+                        kubectl apply -f monitoring/alertmanager-deployment.yaml
+
+                        # Metrics sources
+                        kubectl apply -f monitoring/kube-state-metrics.yaml
+                        kubectl apply -f monitoring/node-exporter.yaml
+
+                        # Grafana provisioning ConfigMaps (must exist before pod starts)
+                        kubectl apply -f monitoring/grafana-provisioning.yaml
+                        kubectl apply -f monitoring/grafana-security-dashboard.yaml
+
+                        # Core monitoring deployments
+                        kubectl apply -f monitoring/prometheus-config.yaml
+                        kubectl apply -f monitoring/prometheus-deployment.yaml
+                        kubectl apply -f monitoring/grafana-deployment.yaml
+
+                        # Network policies and ingress last
+                        kubectl apply -f monitoring/monitoring-networkpolicy.yaml
+                        kubectl apply -f monitoring/monitoring-ingress.yaml
+
+                        # Wait for monitoring deployments to be ready
+                        kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
+                        kubectl rollout status deployment/grafana -n monitoring --timeout=180s
+                        kubectl rollout status deployment/alertmanager -n monitoring --timeout=120s
+                        kubectl rollout status deployment/kube-state-metrics -n monitoring --timeout=120s
+
+                        echo '✅ Monitoring stack deployed'
+                    """
                 }
 
                 echo '✅ Deployment successful'
