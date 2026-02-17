@@ -1,0 +1,38 @@
+# =============================================================================
+# MONITORING PERSISTENT VOLUME CLAIMS
+# =============================================================================
+# Provides durable storage for Prometheus TSDB and Grafana SQLite / plugins.
+# Using emptyDir for monitoring data means metrics are lost on pod restart;
+# these PVCs ensure data persists across restarts and node rescheduling.
+# =============================================================================
+
+# Prometheus TSDB — 15-day retention requires adequate storage headroom.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Grafana SQLite database + installed plugins.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

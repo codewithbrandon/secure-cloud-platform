@@ -1,0 +1,220 @@
+# =============================================================================
+# MONITORING NAMESPACE NETWORK POLICIES
+# =============================================================================
+# Zero-trust baseline: default-deny all ingress and egress, then selectively
+# allow only required traffic paths.
+#
+# Traffic map:
+#   ingress-nginx → Grafana:3000          (dashboard access)
+#   Grafana       → Prometheus:9090       (query metrics)
+#   Prometheus    → Alertmanager:9093     (fire alerts)
+#   Prometheus    → all pods/nodes        (scrape metrics: 8080, 9100, 10250)
+#   Prometheus    → kube-apiserver:443    (service discovery)
+#   All pods      → kube-dns:53           (DNS resolution)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. DEFAULT DENY — block all ingress and egress for the monitoring namespace
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# ---------------------------------------------------------------------------
+# 2. DNS EGRESS — allow all monitoring pods to resolve cluster DNS
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 3. PROMETHEUS EGRESS — scraping and service discovery
+# ---------------------------------------------------------------------------
+# Prometheus requires broad egress: it scrapes pods across all namespaces,
+# connects to the Kubernetes API for service discovery, and pushes alerts to
+# Alertmanager.  We allow specific ports rather than unrestricted 0.0.0.0/0.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Egress
+  egress:
+    # Kubernetes API server (service discovery + webhook targets)
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+
+    # Application metrics (kubernetes-pods, secure-api scrape jobs)
+    - ports:
+        - port: 8080
+          protocol: TCP
+
+    # node-exporter
+    - ports:
+        - port: 9100
+          protocol: TCP
+
+    # kubelet / cAdvisor
+    - ports:
+        - port: 10250
+          protocol: TCP
+        - port: 10255
+          protocol: TCP
+
+    # Alertmanager
+    - to:
+        - podSelector:
+            matchLabels:
+              app: alertmanager
+      ports:
+        - port: 9093
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 4. PROMETHEUS INGRESS — only Grafana may query Prometheus
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-ingress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - port: 9090
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 5. GRAFANA EGRESS — query Prometheus only
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9090
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 6. GRAFANA INGRESS — accept traffic from ingress-nginx namespace only
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-ingress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 3000
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 7. ALERTMANAGER INGRESS — accept alerts from Prometheus only
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alertmanager-ingress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: alertmanager
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9093
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# 8. ALERTMANAGER EGRESS — outbound webhook/SMTP for notifications
+# ---------------------------------------------------------------------------
+# Alertmanager needs to reach external endpoints (PagerDuty webhook, SMTP).
+# Restrict egress to HTTPS (443) and SMTP submission (587) only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alertmanager-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: alertmanager
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 587
+          protocol: TCP

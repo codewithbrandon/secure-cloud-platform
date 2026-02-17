@@ -147,8 +147,8 @@ spec:
               - key: alerts.yml
                 path: alerts.yml
         - name: storage
-          emptyDir:
-            sizeLimit: 10Gi
+          persistentVolumeClaim:
+            claimName: prometheus-data
 
 ---
 # Prometheus Service

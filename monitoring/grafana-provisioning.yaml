@@ -1,0 +1,61 @@
+# =============================================================================
+# GRAFANA AUTO-PROVISIONING CONFIGMAPS
+# =============================================================================
+# Grafana automatically reads YAML files from /etc/grafana/provisioning/ at
+# startup. These ConfigMaps inject datasource and dashboard provider config
+# so no manual UI setup is needed after deployment.
+#
+# grafana-datasources        → mounts at /etc/grafana/provisioning/datasources/
+# grafana-dashboard-providers → mounts at /etc/grafana/provisioning/dashboards/
+# =============================================================================
+
+# Automatically provisions the Prometheus datasource as default.
+# Grafana reads this at startup; changes in the ConfigMap are picked up on
+# pod restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"
+          httpMethod: POST
+          queryTimeout: "60s"
+
+---
+# Configures a dashboard provider that scans /var/lib/grafana/dashboards/
+# for JSON dashboard files. The grafana-security-dashboard ConfigMap is
+# mounted at that path.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-providers
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'secure-cloud-platform'
+        orgId: 1
+        folder: 'Secure Cloud Platform'
+        type: file
+        disableDeletion: true
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards

@@ -138,6 +138,42 @@ data:
             regex: (.+)
 
       # =========================================================================
+      # KUBE-STATE-METRICS (Kubernetes object state)
+      # =========================================================================
+      - job_name: 'kube-state-metrics'
+        static_configs:
+          - targets: ['kube-state-metrics.monitoring.svc.cluster.local:8080']
+        metric_relabel_configs:
+          - action: labeldrop
+            regex: (endpoint|instance|job)
+
+      # =========================================================================
+      # NODE EXPORTER (host-level hardware / OS metrics)
+      # =========================================================================
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - monitoring
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: metrics
+          # Replace the pod IP + port with the node IP + port (hostNetwork)
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+          - source_labels: [__address__]
+            action: replace
+            regex: (.+):\d+
+            replacement: ${1}:9100
+            target_label: __address__
+
+      # =========================================================================
       # SECURE-API APPLICATION
       # =========================================================================
       - job_name: 'secure-api'

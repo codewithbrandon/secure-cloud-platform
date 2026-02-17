@@ -1,0 +1,106 @@
+# =============================================================================
+# ALERTMANAGER CONFIGURATION
+# =============================================================================
+# Defines the routing tree, receivers, and inhibition rules for Alertmanager.
+#
+# Routing:
+#   severity=critical → PagerDuty-style webhook (configure PAGERDUTY_WEBHOOK_URL)
+#   severity=warning  → Email (configure SMTP_* environment variables)
+#   default           → null receiver (silently acknowledged)
+#
+# Inhibition:
+#   A critical alert for the same alertname+namespace silences the corresponding
+#   warning, preventing duplicate noise during active incidents.
+#
+# To activate real notifications:
+#   1. Set PAGERDUTY_WEBHOOK_URL in the alertmanager Secret
+#   2. Set SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, ALERT_EMAIL_TO in the Secret
+#   3. Mount those secrets as env vars in alertmanager-deployment.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+  labels:
+    app: alertmanager
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      # SMTP settings — supply real values via Secret-backed env vars
+      # smtp_smarthost: '${SMTP_HOST}:587'
+      # smtp_from: '${ALERT_EMAIL_FROM}'
+      # smtp_auth_username: '${SMTP_USERNAME}'
+      # smtp_auth_password: '${SMTP_PASSWORD}'
+      # smtp_require_tls: true
+
+    # ---------------------------------------------------------------------------
+    # ROUTING TREE
+    # ---------------------------------------------------------------------------
+    route:
+      # Group related alerts to reduce notification flood
+      group_by: ['alertname', 'severity', 'namespace']
+      group_wait: 30s         # Wait before sending the first notification
+      group_interval: 5m      # Minimum time between notifications for a group
+      repeat_interval: 4h     # Re-notify if issue persists
+      receiver: 'null'        # Default: drop unmatched alerts
+
+      routes:
+        # Critical alerts → immediate webhook (PagerDuty / OpsGenie / etc.)
+        - match:
+            severity: critical
+          receiver: 'pagerduty-critical'
+          group_wait: 10s
+          repeat_interval: 1h
+          continue: false
+
+        # Warning alerts → email digest
+        - match:
+            severity: warning
+          receiver: 'email-warning'
+          group_wait: 1m
+          repeat_interval: 8h
+          continue: false
+
+    # ---------------------------------------------------------------------------
+    # INHIBITION RULES
+    # ---------------------------------------------------------------------------
+    inhibit_rules:
+      # When a critical alert fires, suppress matching warning alerts.
+      # Prevents "HighCPUUsage (warning)" firing alongside "NodeDown (critical)"
+      # for the same target.
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname', 'namespace']
+
+    # ---------------------------------------------------------------------------
+    # RECEIVERS
+    # ---------------------------------------------------------------------------
+    receivers:
+      # Null receiver — silently acknowledges unrouted alerts
+      - name: 'null'
+
+      # PagerDuty / generic webhook for critical alerts
+      - name: 'pagerduty-critical'
+        webhook_configs:
+          - url: 'http://placeholder-pagerduty-webhook:8080/alert'
+            # Replace with real endpoint, e.g.:
+            # url: '${PAGERDUTY_WEBHOOK_URL}'
+            send_resolved: true
+            http_config:
+              # bearer_token: '${WEBHOOK_BEARER_TOKEN}'
+              tls_config:
+                insecure_skip_verify: false
+
+      # Email receiver for warning alerts
+      - name: 'email-warning'
+        email_configs:
+          - to: 'alerts-placeholder@example.com'
+            # Replace with real values:
+            # to: '${ALERT_EMAIL_TO}'
+            send_resolved: true
+            # Requires global smtp_* settings above to be uncommented

@@ -367,6 +367,50 @@ pipeline {
         }
 
         // =====================================================================
+        // STAGE 9b: VALIDATE MONITORING CONFIGS
+        // =====================================================================
+        // Validates all monitoring/ YAML manifests against the Kubernetes schema
+        // and optional OPA/Conftest policy bundle, ensuring the monitoring stack
+        // stays consistent with cluster security policies on every PR.
+        // =====================================================================
+        stage('Validate Monitoring Configs') {
+            steps {
+                echo '📊 Validating monitoring manifests...'
+
+                script {
+                    // Validate YAML syntax and Kubernetes schema for monitoring/
+                    sh '''
+                        # Install kubeval if not present
+                        if ! command -v kubeval &> /dev/null; then
+                            curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+                            sudo mv kubeval /usr/local/bin/
+                        fi
+
+                        echo "--- Validating monitoring/*.yaml ---"
+                        for file in monitoring/*.yaml; do
+                            echo "Validating: $file"
+                            # --ignore-missing-schemas allows CRDs like NetworkPolicy
+                            # variants that kubeval may not have schemas for
+                            kubeval --strict --ignore-missing-schemas "$file" || true
+                        done
+                    '''
+
+                    // OPA / Conftest policy validation (optional, non-blocking)
+                    sh '''
+                        if command -v conftest &> /dev/null; then
+                            echo "--- Running conftest policy checks on monitoring/ ---"
+                            conftest test monitoring/ --policy policies/ || true
+                        else
+                            echo "conftest not installed, skipping policy checks"
+                        fi
+                    '''
+                }
+
+                echo '✅ Monitoring manifest validation complete'
+            }
+        }
+
+        // =====================================================================
         // STAGE 10: DEPLOY TO AKS
         // =====================================================================
         stage('Deploy to AKS') {

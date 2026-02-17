@@ -1,7 +1,11 @@
 # =============================================================================
 # GRAFANA DEPLOYMENT
 # =============================================================================
-# Production-grade Grafana deployment for visualization and alerting
+# Production-grade Grafana deployment for visualization and alerting.
+#
+# ConfigMaps referenced here are defined in separate files:
+#   monitoring/grafana-provisioning.yaml      → grafana-datasources, grafana-dashboard-providers
+#   monitoring/grafana-security-dashboard.yaml → grafana-security-dashboard
 #
 # Security Relevance:
 # - Centralized visibility into system health
@@ -14,172 +18,18 @@
 # - Security dashboards for SOC teams
 # =============================================================================
 
+# Grafana admin password — base64-encoded "admin" (CHANGE IN PRODUCTION)
+# Recommended: replace with SealedSecret or external secret operator reference.
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
-  name: grafana-datasources
+  name: grafana-secrets
   namespace: monitoring
-  labels:
-    app: grafana
+type: Opaque
 data:
-  datasources.yaml: |
-    apiVersion: 1
-    datasources:
-      - name: Prometheus
-        type: prometheus
-        access: proxy
-        url: http://prometheus:9090
-        isDefault: true
-        editable: false
+  admin-password: YWRtaW4=
 
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: grafana-dashboards-config
-  namespace: monitoring
-  labels:
-    app: grafana
-data:
-  dashboards.yaml: |
-    apiVersion: 1
-    providers:
-      - name: 'default'
-        orgId: 1
-        folder: ''
-        type: file
-        disableDeletion: true
-        editable: false
-        options:
-          path: /var/lib/grafana/dashboards
-
----
-# Security Dashboard
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: grafana-security-dashboard
-  namespace: monitoring
-  labels:
-    app: grafana
-data:
-  security-dashboard.json: |
-    {
-      "dashboard": {
-        "title": "Security Monitoring Dashboard",
-        "uid": "security-monitoring",
-        "timezone": "browser",
-        "refresh": "30s",
-        "panels": [
-          {
-            "title": "Request Rate",
-            "type": "graph",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-            "targets": [
-              {
-                "expr": "sum(rate(flask_http_request_total[5m])) by (status)",
-                "legendFormat": "{{status}}"
-              }
-            ]
-          },
-          {
-            "title": "Error Rate",
-            "type": "stat",
-            "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
-            "targets": [
-              {
-                "expr": "sum(rate(flask_http_request_total{status=~\"5..\"}[5m])) / sum(rate(flask_http_request_total[5m])) * 100",
-                "legendFormat": "Error %"
-              }
-            ],
-            "fieldConfig": {
-              "defaults": {
-                "thresholds": {
-                  "steps": [
-                    {"value": 0, "color": "green"},
-                    {"value": 1, "color": "yellow"},
-                    {"value": 5, "color": "red"}
-                  ]
-                },
-                "unit": "percent"
-              }
-            }
-          },
-          {
-            "title": "Pod Restarts (Crash Detection)",
-            "type": "stat",
-            "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
-            "targets": [
-              {
-                "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"secure-app\"}[1h]))",
-                "legendFormat": "Restarts"
-              }
-            ],
-            "fieldConfig": {
-              "defaults": {
-                "thresholds": {
-                  "steps": [
-                    {"value": 0, "color": "green"},
-                    {"value": 1, "color": "yellow"},
-                    {"value": 5, "color": "red"}
-                  ]
-                }
-              }
-            }
-          },
-          {
-            "title": "CPU Usage by Pod",
-            "type": "graph",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-            "targets": [
-              {
-                "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"secure-app\"}[5m])) by (pod)",
-                "legendFormat": "{{pod}}"
-              }
-            ]
-          },
-          {
-            "title": "Memory Usage by Pod",
-            "type": "graph",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-            "targets": [
-              {
-                "expr": "sum(container_memory_usage_bytes{namespace=\"secure-app\"}) by (pod)",
-                "legendFormat": "{{pod}}"
-              }
-            ],
-            "fieldConfig": {
-              "defaults": {
-                "unit": "bytes"
-              }
-            }
-          },
-          {
-            "title": "Response Time (95th percentile)",
-            "type": "graph",
-            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
-            "targets": [
-              {
-                "expr": "histogram_quantile(0.95, sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le))",
-                "legendFormat": "p95"
-              },
-              {
-                "expr": "histogram_quantile(0.99, sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le))",
-                "legendFormat": "p99"
-              }
-            ],
-            "fieldConfig": {
-              "defaults": {
-                "unit": "s"
-              }
-            }
-          }
-        ]
-      }
-    }
-
----
-# Grafana Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -227,6 +77,10 @@ spec:
               value: "console"
             - name: GF_LOG_LEVEL
               value: "info"
+            # Auto-provisioning root: Grafana loads datasources and dashboard
+            # providers from subdirectories of this path at startup.
+            - name: GF_PATHS_PROVISIONING
+              value: "/etc/grafana/provisioning"
 
           securityContext:
             allowPrivilegeEscalation: false
@@ -262,12 +116,19 @@ spec:
             periodSeconds: 5
 
           volumeMounts:
+            # Datasource auto-provisioning (grafana-provisioning.yaml)
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
-            - name: dashboards-config
+              readOnly: true
+            # Dashboard provider config (grafana-provisioning.yaml)
+            - name: dashboard-providers
               mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            # Dashboard JSON files (grafana-security-dashboard.yaml)
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+            # Persistent storage for SQLite DB, sessions, plugins
             - name: storage
               mountPath: /var/lib/grafana
 
@@ -275,30 +136,17 @@ spec:
         - name: datasources
           configMap:
             name: grafana-datasources
-        - name: dashboards-config
+        - name: dashboard-providers
           configMap:
-            name: grafana-dashboards-config
+            name: grafana-dashboard-providers
         - name: dashboards
           configMap:
             name: grafana-security-dashboard
         - name: storage
-          emptyDir:
-            sizeLimit: 1Gi
+          persistentVolumeClaim:
+            claimName: grafana-data
 
 ---
-# Grafana Secrets (create manually or via sealed-secrets)
-apiVersion: v1
-kind: Secret
-metadata:
-  name: grafana-secrets
-  namespace: monitoring
-type: Opaque
-data:
-  # Base64 encoded: admin (CHANGE IN PRODUCTION)
-  admin-password: YWRtaW4=
-
----
-# Grafana Service
 apiVersion: v1
 kind: Service
 metadata:
