@@ -1,0 +1,467 @@
+// ============================================================
+// Analytics Rule: Privileged Container & Risky K8s Config Detection
+// ============================================================
+//
+// Description:   Detects creation or modification of Kubernetes
+//                workloads with dangerous security configurations:
+//
+//                [1] Privileged containers (equivalent to root on host)
+//                [2] Dangerous hostPath mounts (container escape path)
+//                [3] cluster-admin ClusterRoleBinding creation
+//                    (permanent privilege escalation / persistence)
+//
+//                These three patterns represent the most common
+//                post-compromise techniques for escaping container
+//                isolation and persisting in a Kubernetes cluster.
+//
+// Data Source:   AKSAudit (Resource-Specific Diagnostic Logs)
+//
+// Prerequisite:  AKS Diagnostic Settings:
+//                  Category:    kube-audit (Resource-Specific)
+//                  Destination: Log Analytics Workspace
+//                Audit Policy must capture RequestObject:
+//                  Level: Request (captures request body for pod specs)
+//
+// Sentinel Rule Config:
+//                  Query Frequency:    5 minutes
+//                  Query Period:       5 minutes
+//                  Alert Threshold:    > 0 results
+//                  Event Grouping:     Alert per row
+//                  Entity Mapping:
+//                    Account     → Actor
+//                    IP          → SourceIPs
+//                    CloudResource → ClusterResourceId
+//
+// MITRE ATT&CK:
+//   - TA0004  Privilege Escalation
+//   - T1611   Escape to Host (privileged containers, hostPath)
+//   - T1610   Deploy Container (malicious workload deployment)
+//   - TA0003  Persistence
+//   - T1078   Valid Accounts (cluster-admin binding for persistence)
+//   - T1548   Abuse Elevation Control Mechanism
+//
+// Severity:
+//   - ClusterAdminBinding:    Critical (always)
+//   - PrivilegedContainer:    High
+//   - HostPath Critical path: Critical
+//   - HostPath High path:     High
+//   - HostPath Medium path:   Medium
+//
+// Author:        Platform Security Engineering
+// Last Updated:  2026-02-19
+// ============================================================
+
+// ── Tuning Parameters ─────────────────────────────────────────────
+
+let LookbackPeriod = 5m;
+
+// Workload namespaces where privileged containers may be legitimately
+// required (e.g., DaemonSets for CNI plugins, log collectors).
+// Keep this list minimal — each entry reduces detection coverage.
+let AuthorizedPrivilegedNamespaces = dynamic([
+    "kube-system",       // AKS system components (CNI, DNS, etc.)
+    "azure-arc",         // Azure Arc agent if deployed
+    "monitoring"         // Prometheus node-exporter may require host access
+]);
+
+// Service accounts pre-approved to create privileged workloads.
+// These must be reviewed and revalidated quarterly.
+let AuthorizedPrivilegedActors = dynamic([
+    "system:serviceaccount:kube-system:daemon-set-controller",
+    "system:serviceaccount:kube-system:node-controller",
+    "system:serviceaccount:kube-system:azure-cni-networkmonitor"
+]);
+
+// ── DETECTION 1: Privileged Container Creation ────────────────────
+//
+// A container with securityContext.privileged=true bypasses all
+// kernel namespace isolation. The container process shares the
+// host's PID, network, and IPC namespaces by default and has
+// write access to all host devices. This is functionally equivalent
+// to running a process as root directly on the Kubernetes node.
+//
+// Attack chain: Deploy privileged pod → nsenter -t 1 -m -u -i -n /bin/bash
+// This gives the attacker a root shell on the underlying VM.
+//
+let PrivilegedContainerCreation =
+AKSAudit
+| where TimeGenerated >= ago(LookbackPeriod)
+| where Stage =~ "ResponseComplete"
+// Capture creation/mutation of any workload type that embeds a pod spec
+| where ObjectRef_Resource in~ (
+    "pods", "deployments", "daemonsets", "statefulsets",
+    "replicasets", "jobs", "cronjobs", "replicationcontrollers"
+)
+| where Verb in~ ("create", "update", "patch")
+// Only successful operations — mutations that were denied don't create risk
+| where ResponseStatus_Code in (200, 201)
+// Exclude known-good system actors
+| where User_Username !in (AuthorizedPrivilegedActors)
+// Parse the Kubernetes resource spec from the audit request body
+| extend RequestObj = parse_json(RequestObject)
+// Expand each container in the pod spec (supports multi-container pods)
+| mv-expand Container = RequestObj.spec.containers
+| extend ContainerName   = tostring(Container.name)
+| extend ContainerImage  = tostring(Container.image)
+| extend SecCtx          = Container.securityContext
+| extend PodSecCtx       = RequestObj.spec.securityContext
+
+// ── Security Context Checks ───────────────────────────────────────
+// Each check maps to a specific container escape or privilege abuse vector.
+
+// privileged: true — grants all kernel capabilities, host device access
+| extend IsPrivileged = tobool(SecCtx.privileged) == true
+
+// allowPrivilegeEscalation controls whether a child process can gain
+// more privileges than its parent. Default=true in K8s. Should be false.
+| extend AllowsEscalation = tobool(SecCtx.allowPrivilegeEscalation) != false
+
+// Running as root (UID 0) inside the container
+| extend RunsAsRoot = (
+    toint(SecCtx.runAsUser) == 0
+    or tobool(SecCtx.runAsNonRoot) != true
+    or toint(PodSecCtx.runAsUser) == 0
+)
+
+// Dangerous capabilities — individual capabilities that approximate
+// privileged mode for specific attack vectors:
+//   SYS_ADMIN: broad kernel ops, often abused for namespace escape
+//   NET_ADMIN:  full network control (routing, iptables manipulation)
+//   SYS_PTRACE: can ptrace any process on the host if pid namespace shared
+//   ALL:        grants every capability — equivalent to privileged
+| extend CapAdd = tostring(SecCtx.capabilities.add)
+| extend HasDangerousCapability = (
+    CapAdd contains "SYS_ADMIN"
+    or CapAdd contains "NET_ADMIN"
+    or CapAdd contains "SYS_PTRACE"
+    or CapAdd contains "SYS_RAWIO"
+    or CapAdd contains "NET_RAW"
+    or CapAdd contains '"ALL"'
+)
+
+// hostPID/hostNetwork/hostIPC: sharing host namespaces without
+// privileged flag is still dangerous (can ptrace host processes, etc.)
+| extend SharesHostPID     = tobool(RequestObj.spec.hostPID) == true
+| extend SharesHostNetwork = tobool(RequestObj.spec.hostNetwork) == true
+| extend SharesHostIPC     = tobool(RequestObj.spec.hostIPC) == true
+
+// Filter to only risky configurations
+| where IsPrivileged
+    or (AllowsEscalation and RunsAsRoot)
+    or HasDangerousCapability
+    or SharesHostPID
+    or SharesHostNetwork
+
+// Severity: elevated if outside authorized namespace
+| extend InAuthorizedNamespace = ObjectRef_Namespace in (AuthorizedPrivilegedNamespaces)
+| extend AlertSeverity = case(
+    not(InAuthorizedNamespace) and (IsPrivileged or HasDangerousCapability), "Critical",
+    not(InAuthorizedNamespace), "High",
+    IsPrivileged or HasDangerousCapability, "High",
+    "Medium"
+)
+
+| extend DetectionType = "PrivilegedContainer"
+| extend RemediationHint = strcat(
+    "1. Immediately review pod: kubectl get pod -n ", ObjectRef_Namespace, " ", ObjectRef_Name, " -o yaml | ",
+    "2. If unauthorized, terminate: kubectl delete pod -n ", ObjectRef_Namespace, " ", ObjectRef_Name, " | ",
+    "3. Enforce PodSecurity admission (restricted profile) on namespace | ",
+    "4. Review OPA/Gatekeeper policies for privilege controls"
+)
+
+| project
+    TimeGenerated,
+    DetectionType,
+    AlertSeverity,
+    Actor           = User_Username,
+    ActorGroups     = tostring(User_Groups),
+    UserAgent,
+    SourceIPs       = tostring(SourceIps),
+    Namespace       = ObjectRef_Namespace,
+    ResourceKind    = ObjectRef_Resource,
+    ResourceName    = ObjectRef_Name,
+    ContainerName,
+    ContainerImage,
+    // Risk flags
+    IsPrivileged,
+    AllowsEscalation,
+    RunsAsRoot,
+    HasDangerousCapability,
+    DangerousCapsList = CapAdd,
+    SharesHostPID,
+    SharesHostNetwork,
+    SharesHostIPC,
+    InAuthorizedNamespace,
+    RemediationHint,
+    MitreTactic      = "Privilege Escalation",
+    MitreTechnique   = "T1611 - Escape to Host | T1610 - Deploy Container",
+    ClusterResourceId = ResourceId,
+    AuditEventId     = AuditID;
+
+
+// ── DETECTION 2: Dangerous hostPath Volume Mounts ─────────────────
+//
+// Mounting the host filesystem into a container allows an attacker
+// to read/write files that exist on the underlying Kubernetes node,
+// enabling credential theft, persistent access, and container escape.
+//
+// Most dangerous hostPath targets:
+//   /                          — full host filesystem access
+//   /etc, /etc/kubernetes      — kubeconfig, PKI certificates
+//   /var/run/docker.sock       — Docker daemon socket (spawn privileged containers)
+//   /run/containerd/           — containerd socket (spawn privileged containers)
+//   /proc                      — kernel process table (read host process memory)
+//   /sys                       — kernel interfaces (write kernel parameters)
+//   /dev                       — device files (write to disks, etc.)
+//   /var/lib/kubelet           — kubelet credentials and config
+//
+let HostPathMounts =
+AKSAudit
+| where TimeGenerated >= ago(LookbackPeriod)
+| where Stage =~ "ResponseComplete"
+| where ObjectRef_Resource in~ (
+    "pods", "deployments", "daemonsets", "statefulsets",
+    "replicasets", "jobs", "cronjobs"
+)
+| where Verb in~ ("create", "update", "patch")
+| where ResponseStatus_Code in (200, 201)
+| extend RequestObj = parse_json(RequestObject)
+// Expand each volume in the pod spec
+| mv-expand Volume = RequestObj.spec.volumes
+// Filter to hostPath volumes only (exclude emptyDir, configMap, secret, pvc)
+| where isnotnull(Volume.hostPath)
+| extend HostPathValue = tostring(Volume.hostPath.path)
+| extend VolumeType    = tostring(Volume.hostPath.type)  // Directory, File, Socket, etc.
+| extend VolumeName    = tostring(Volume.name)
+
+// Classify the risk level of the mounted path
+| extend PathRiskLevel = case(
+    // Critical: paths that provide immediate full host/cluster compromise
+    HostPathValue == "/"
+        or HostPathValue == "/etc"
+        or HostPathValue == "/etc/kubernetes"
+        or HostPathValue == "/etc/ssl"
+        or HostPathValue == "/etc/pki"
+        or HostPathValue contains "docker.sock"
+        or HostPathValue contains "containerd.sock"
+        or HostPathValue == "/var/run"
+        or HostPathValue startswith "/run/containerd"
+        or HostPathValue == "/var/lib/kubelet",              "Critical",
+
+    // High: paths enabling privilege escalation or credential theft
+    HostPathValue startswith "/proc"
+        or HostPathValue startswith "/sys"
+        or HostPathValue startswith "/dev"
+        or HostPathValue startswith "/boot"
+        or HostPathValue == "/root",                         "High",
+
+    // Medium: paths enabling data exfiltration or lateral movement
+    HostPathValue startswith "/var/log"
+        or HostPathValue startswith "/var/lib"
+        or HostPathValue startswith "/home"
+        or HostPathValue startswith "/etc/",                 "Medium",
+
+    // Low: commonly used but lower-risk paths
+    HostPathValue startswith "/tmp"
+        or HostPathValue startswith "/usr/share",            "Low",
+
+    "Low"
+)
+
+| where PathRiskLevel in ("Critical", "High", "Medium")
+
+| extend AlertSeverity = PathRiskLevel  // Path risk maps directly to severity
+
+| extend DetectionType = "HostPathMount"
+| extend RemediationHint = strcat(
+    "1. kubectl get pod -n ", ObjectRef_Namespace, " -l all -o yaml | grep -A5 hostPath | ",
+    "2. Replace hostPath with PersistentVolumeClaim or CSI volume driver | ",
+    "3. If container runtime socket mounted, treat as Critical — node compromise possible"
+)
+
+| project
+    TimeGenerated,
+    DetectionType,
+    AlertSeverity,
+    Actor          = User_Username,
+    ActorGroups    = tostring(User_Groups),
+    UserAgent,
+    SourceIPs      = tostring(SourceIps),
+    Namespace      = ObjectRef_Namespace,
+    ResourceKind   = ObjectRef_Resource,
+    ResourceName   = ObjectRef_Name,
+    VolumeName,
+    HostPathValue,
+    VolumeType,
+    PathRiskLevel,
+    RemediationHint,
+    MitreTactic    = "Privilege Escalation / Persistence",
+    MitreTechnique = "T1611 - Escape to Host",
+    ClusterResourceId = ResourceId,
+    AuditEventId   = AuditID;
+
+
+// ── DETECTION 3: cluster-admin ClusterRoleBinding Creation ────────
+//
+// cluster-admin is the Kubernetes super-admin role — it grants
+// full read/write access to every resource across every namespace,
+// including secrets, certificates, and workload execution.
+//
+// Adversaries create ClusterRoleBindings as a persistence mechanism:
+// after gaining initial foothold, they bind cluster-admin to a
+// compromised service account or user to maintain permanent access
+// even if the initial breach vector is patched.
+//
+// Any new cluster-admin binding must be treated as Critical:
+// unauthorized bindings indicate active compromise or insider threat.
+//
+let ClusterAdminBinding =
+AKSAudit
+| where TimeGenerated >= ago(LookbackPeriod)
+| where Stage =~ "ResponseComplete"
+| where ObjectRef_Resource in~ ("clusterrolebindings", "rolebindings")
+| where Verb in~ ("create", "update", "patch")
+| where ResponseStatus_Code in (200, 201)
+| extend RequestObj = parse_json(RequestObject)
+| extend RoleRef    = RequestObj.roleRef
+| extend Subjects   = RequestObj.subjects
+
+// Detect high-privilege role references
+// This covers cluster-admin exactly and common admin-equivalent roles
+| extend RoleGranted = tostring(RoleRef.name)
+| extend IsClusterAdmin = (
+    RoleGranted =~ "cluster-admin"
+    or RoleGranted =~ "admin"
+    or RoleGranted contains "cluster-admin"
+)
+
+// Also detect wildcard verb bindings (functionally cluster-admin)
+| extend RoleRules = tostring(RequestObj.rules)
+| extend HasWildcardRule = (
+    RoleRules contains '"verbs":["*"]'
+    or RoleRules contains '"resources":["*"]'
+)
+
+| where IsClusterAdmin or HasWildcardRule
+
+// Expand subjects — one binding can grant access to multiple entities
+| mv-expand Subject = Subjects
+| extend GrantedTo        = tostring(Subject.name)
+| extend GrantedToKind    = tostring(Subject.kind)    // User | ServiceAccount | Group
+| extend GrantedToNs      = tostring(Subject.namespace)
+
+// Flag dangerous subject types
+| extend IsServiceAccount = GrantedToKind =~ "ServiceAccount"
+| extend IsGroupBinding   = GrantedToKind =~ "Group"   // Broad blast radius
+
+// Detect bindings to wildcard or all-authenticated-users groups
+| extend IsWildcardSubject = (
+    GrantedTo =~ "system:authenticated"
+    or GrantedTo =~ "system:unauthenticated"
+    or GrantedTo =~ "system:masters"
+)
+
+| extend AlertSeverity  = "Critical"  // Always critical — no exceptions
+| extend DetectionType  = "ClusterAdminBinding"
+| extend RemediationHint = strcat(
+    "IMMEDIATE: kubectl delete clusterrolebinding ", ObjectRef_Name, " | ",
+    "Audit actor: kubectl auth can-i --as=", User_Username, " --list | ",
+    "Review recent activity: AKSAudit | where User_Username == '", User_Username, "' | order by TimeGenerated desc"
+)
+
+| project
+    TimeGenerated,
+    DetectionType,
+    AlertSeverity,
+    Actor              = User_Username,
+    ActorGroups        = tostring(User_Groups),
+    UserAgent,
+    SourceIPs          = tostring(SourceIps),
+    BindingName        = ObjectRef_Name,
+    BindingNamespace   = ObjectRef_Namespace,  // empty for ClusterRoleBinding
+    RoleGranted,
+    GrantedTo,
+    GrantedToKind,
+    GrantedToNamespace = GrantedToNs,
+    IsServiceAccount,
+    IsGroupBinding,
+    IsWildcardSubject,
+    HasWildcardRule,
+    RemediationHint,
+    MitreTactic        = "Privilege Escalation / Persistence",
+    MitreTechnique     = "T1078 - Valid Accounts | T1548 - Abuse Elevation Control",
+    ClusterResourceId  = ResourceId,
+    AuditEventId       = AuditID;
+
+
+// ══════════════════════════════════════════════════════════════════
+// UNION: Combine All Three Detections into a Single Analytics Rule
+// ══════════════════════════════════════════════════════════════════
+//
+// Using a single Sentinel Analytics Rule to emit all three detection
+// types reduces operational overhead while maintaining per-event
+// granularity. Each row in the output is a distinct security event.
+//
+// If you need independent suppression or different response playbooks
+// per detection type, split these into separate Analytics Rules.
+//
+
+union
+    PrivilegedContainerCreation,
+    HostPathMounts,
+    ClusterAdminBinding
+
+// Deduplicate: the same audit event may be matched by multiple
+// detections (e.g., a privileged pod with a hostPath mount).
+// Keep the highest-severity match per unique audit event ID.
+| summarize
+    arg_max(AlertSeverity, *)
+    by AuditEventId
+
+// ── Final Enrichment ──────────────────────────────────────────────
+| extend
+
+    // Normalized severity score for ordering (Critical=4, High=3, etc.)
+    SeverityOrder = case(
+        AlertSeverity == "Critical", 4,
+        AlertSeverity == "High",     3,
+        AlertSeverity == "Medium",   2,
+        1
+    ),
+
+    // Incident title for Sentinel alert: visible in the incident queue
+    IncidentTitle = strcat(
+        "[K8s Security | ", AlertSeverity, "] ",
+        DetectionType, " | ",
+        Actor, " | ",
+        Namespace, " | ",
+        ResourceName
+    ),
+
+    // Response SLA guidance based on severity
+    ResponseSLA = case(
+        AlertSeverity == "Critical", "Acknowledge: 5min | Contain: 30min",
+        AlertSeverity == "High",     "Acknowledge: 15min | Contain: 60min",
+        AlertSeverity == "Medium",   "Acknowledge: 60min | Contain: 4hr",
+        "Review within 24hr"
+    )
+
+// Sort: Critical first, then by timestamp within severity tier
+| order by SeverityOrder desc, TimeGenerated desc
+
+// ── Operational Notes ─────────────────────────────────────────────
+// 1. AUDIT POLICY:  Detection 1 and 2 require kube-audit RequestObject
+//    capture. Ensure your AKS audit policy level is set to "Request"
+//    or "RequestResponse" — "Metadata" level will NOT capture pod specs.
+//
+// 2. GATEKEEPER:    If OPA/Gatekeeper is deployed, Detection 1 and 2
+//    may generate alerts on BLOCKED attempts (403). This is valuable —
+//    it means someone is trying. Do not suppress these alerts.
+//
+// 3. INIT CONTAINERS: This query expands `spec.containers` only.
+//    Add a parallel mv-expand on `spec.initContainers` if you need
+//    coverage for privileged init containers (rare but possible).
+//
+// 4. EPHEMERAL CONTAINERS: kubectl debug uses ephemeral containers
+//    (spec.ephemeralContainers). Add this to the mv-expand if your
+//    Kubernetes version supports them (1.23+).

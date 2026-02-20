@@ -1,0 +1,108 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "comment": "Microsoft Sentinel Analytics Rule — AKS Pod Exec Detection. Deploy via: az deployment group create --template-file pod-exec-analytics-rule.json --resource-group <rg>",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics Workspace linked to Microsoft Sentinel"
+      }
+    },
+    "ruleEnabled": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Set to false to deploy in disabled state for initial tuning"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-pod-exec-unauthorized-', uniqueString(resourceGroup().id))]",
+      "apiVersion": "2023-02-01-preview",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS - Unauthorized Pod Exec Detected",
+        "description": "Detects unauthorized kubectl exec or direct API exec calls into Kubernetes pods. An exec session into a running pod is a strong indicator of post-compromise activity. Maps to MITRE ATT&CK T1609 (Container Administration Command) and T1611 (Escape to Host).",
+        "severity": "High",
+        "enabled": "[parameters('ruleEnabled')]",
+        "query": "// See: sentinel/kql/aks_pod_exec_detection.kql\n// Paste full KQL query content here for production deployment\nAKSAudit\n| where TimeGenerated >= ago(5m)\n| where Stage =~ \"ResponseComplete\"\n| where ObjectRef_Resource =~ \"pods\"\n    and ObjectRef_Subresource =~ \"exec\"\n    and Verb =~ \"create\"\n| where User_Username !startswith \"system:node:\"\n    and User_Username !startswith \"system:serviceaccount:kube-system:\"\n| extend IsKubectl = UserAgent contains \"kubectl\"\n| extend IsAnonymous = User_Username =~ \"system:anonymous\" or isempty(User_Username)\n| extend ExecSucceeded = ResponseStatus_Code in (101, 200)\n| extend RiskScore = case(\n    IsAnonymous and ExecSucceeded, 100,\n    IsKubectl and ExecSucceeded, 75,\n    IsAnonymous, 85,\n    IsKubectl, 50,\n    45)\n| where RiskScore >= 45 or IsAnonymous\n| extend AlertSeverity = case(RiskScore >= 90, \"Critical\", RiskScore >= 70, \"High\", \"Medium\")\n| project TimeGenerated, ActorUsername=User_Username, UserAgent,\n    SourceIPs=tostring(SourceIps), TargetPod=ObjectRef_Name,\n    TargetNamespace=ObjectRef_Namespace, ResponseCode=ResponseStatus_Code,\n    ExecSucceeded, RiskScore, AlertSeverity,\n    ClusterResourceId=ResourceId, AuditEventId=AuditID,\n    MitreTechnique=\"T1609 - Container Administration Command\"\n| order by RiskScore desc",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "LateralMovement"
+        ],
+        "techniques": [
+          "T1609",
+          "T1611"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "AKS Pod Exec | {{AlertSeverity}} | {{ActorUsername}} → {{TargetNamespace}}/{{TargetPod}}",
+          "alertDescriptionFormat": "Unauthorized exec into pod {{TargetPod}} in namespace {{TargetNamespace}} by {{ActorUsername}} from {{SourceIPs}}. Exec succeeded: {{ExecSucceeded}}. Risk score: {{RiskScore}}/100. MITRE: {{MitreTechnique}}",
+          "alertSeverityColumnName": "AlertSeverity"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5M",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "Account",
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [
+              "DisplayName"
+            ],
+            "groupByCustomDetails": []
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorUsername"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIPs"
+              }
+            ]
+          },
+          {
+            "entityType": "CloudResource",
+            "fieldMappings": [
+              {
+                "identifier": "ResourceId",
+                "columnName": "ClusterResourceId"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "RiskScore": "RiskScore",
+          "ExecSucceeded": "ExecSucceeded",
+          "MitreTechnique": "MitreTechnique"
+        }
+      }
+    }
+  ]
+}

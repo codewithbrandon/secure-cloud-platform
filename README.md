@@ -11,6 +11,7 @@ DevSecOps, and full-stack observability.
 ![Jenkins](https://img.shields.io/badge/Jenkins-D24939?style=for-the-badge&logo=jenkins&logoColor=white)
 ![Terraform](https://img.shields.io/badge/Terraform-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Sentinel](https://img.shields.io/badge/Microsoft%20Sentinel-0078D4?style=for-the-badge&logo=microsoft-azure&logoColor=white)
 
 ---
 
@@ -23,7 +24,8 @@ a deliberate architectural decision.
 | Capability | Implementation |
 |---|---|
 | Zero-trust networking | Default-deny NetworkPolicies across all namespaces |
-| Defense in depth | Security controls at network, identity, container, and CI/CD layers |
+| Defense in depth | Security controls at network, identity, container, CI/CD, and runtime layers |
+| Runtime detection | Microsoft Sentinel + AKS audit logs — exec, privileged pods, RBAC escalation |
 | DevSecOps | Security gates block every pipeline stage — not just deployment |
 | Full observability | Prometheus + Grafana + Alertmanager with auto-provisioned dashboards |
 | Infrastructure as Code | 71 Azure resources, all Kubernetes manifests, all pipeline config |
@@ -88,6 +90,10 @@ a deliberate architectural decision.
 ```
 Layer               Control
 ─────────────────────────────────────────────────────────────
+Detect & Respond    Microsoft Sentinel — KQL analytics rules (5-min polling)
+                    AKS audit logs → exec detection, privileged pod, RBAC escalation
+                    Automated incident response via Logic App playbooks
+
 Network             NSGs + Kubernetes NetworkPolicies (default-deny)
                     Application Gateway WAF
                     Private endpoints for PaaS services
@@ -120,8 +126,9 @@ CI/CD               Secrets scanning (gitleaks) — blocks on detect
 | Threat | Mitigation |
 |---|---|
 | SQL Injection | Parameterized queries, WAF rules, input validation |
-| Container Escape | Non-root, read-only FS, dropped capabilities |
-| Lateral Movement | Default-deny NetworkPolicies, namespace isolation |
+| Container Escape | Non-root, read-only FS, dropped capabilities + Sentinel T1611 detection |
+| Lateral Movement | Default-deny NetworkPolicies, namespace isolation + Sentinel T1609 detection |
+| Privilege Escalation | Pod Security Standards + Sentinel cluster-admin binding detection (T1078) |
 | Credential Theft | Managed Identity, Key Vault, no stored secrets |
 | Supply Chain | Trivy image scan, pip-audit, pinned image digests |
 | Brute Force | Rate limiting (ingress), auth failure alerting |
@@ -225,6 +232,51 @@ deployment runs on `main` only.
 
 ---
 
+## Runtime Detection & Automated Response
+
+### Overview
+
+This platform implements a **Runtime Detection & Response** layer using Microsoft Sentinel as the SIEM/SOAR engine, backed by AKS native audit logging. The layer operates continuously on live cluster telemetry — independent of build-time scanning or admission controls — ensuring that post-compromise activity is detected even when an attacker uses legitimate credentials or bypasses static controls.
+
+### Detection Architecture
+
+```
+AKS API Server → kube-audit logs → Diagnostic Settings
+    → Log Analytics Workspace (AKSAudit table)
+        → Sentinel Analytics Rules (5-min KQL polling)
+            → Incident → Entity Mapping → Automated Playbook
+```
+
+### Detection Scenarios
+
+| Scenario | Rule | Severity | MITRE |
+|---|---|---|---|
+| `kubectl exec` into running pod | `aks_pod_exec_detection.kql` | High → Critical | T1609 |
+| Privileged container deployed | `privileged_pod_detection.kql` | High → Critical | T1611 |
+| Dangerous `hostPath` mount | `privileged_pod_detection.kql` | Medium → Critical | T1611 |
+| `cluster-admin` binding created | `privileged_pod_detection.kql` | Critical | T1078 |
+
+### Why Runtime Detection Matters
+
+Shift-left security (image scanning, IaC linting, admission policies) operates on known-bad patterns at build and deploy time. Runtime detection operates in the opposite direction: it assumes that a well-resourced attacker has already bypassed preventive controls — through a stolen kubeconfig, a compromised CI/CD token, or a zero-day — and focuses entirely on detecting the **behavior** of post-compromise activity.
+
+A `kubectl exec` command that reaches a production pod leaves a 5-minute detection window before an attacker can access mounted secrets or attempt a container escape. This layer is designed to close that window with automated alerting and a structured SOC runbook.
+
+### Response Capability
+
+On detection, the platform supports:
+
+- **Namespace quarantine** via deny-all `NetworkPolicy` (preserves pod for forensics)
+- **Credential invalidation** — Azure AD session revocation + Kubernetes SA deletion
+- **Secret rotation** via Azure Key Vault + Kubernetes secret update
+- **RBAC remediation** — binding deletion + least-privilege replacement
+- **Node draining** for confirmed node-level compromise
+
+See [`docs/detections-runtime.md`](docs/detections-runtime.md) for architecture detail and attack simulation guide.
+See [`docs/incident-response-runbook.md`](docs/incident-response-runbook.md) for the full SOC runbook.
+
+---
+
 ## Live Demo
 
 ### AKS Portal
@@ -309,6 +361,15 @@ secure-cloud-platform/
 │   └── monitoring-ingress.yaml
 ├── jenkins/
 │   └── Jenkinsfile             # 11-stage DevSecOps pipeline
+├── sentinel/                   # Runtime detection layer (Microsoft Sentinel)
+│   ├── kql/
+│   │   ├── aks_pod_exec_detection.kql      # T1609 — unauthorized exec detection
+│   │   └── privileged_pod_detection.kql    # T1611/T1078 — privileged pod & RBAC
+│   └── analytics-rules/
+│       └── pod-exec-analytics-rule.json    # ARM template for Sentinel rule deploy
+├── docs/
+│   ├── detections-runtime.md               # Architecture, log setup, simulation guide
+│   └── incident-response-runbook.md        # SOC runbook — triage → contain → recover
 └── ansible/
     └── playbooks/
         └── harden-jenkins.yaml
@@ -406,6 +467,7 @@ kubectl port-forward svc/grafana 3000:3000 -n monitoring
 | Containers | Docker, Kubernetes 1.32, containerd |
 | CI/CD | Jenkins (11-stage DevSecOps pipeline) |
 | Security scanning | gitleaks, bandit, pip-audit, Trivy |
+| Runtime detection | Microsoft Sentinel, KQL Analytics Rules, AKS Audit Logs |
 | Observability | Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter |
 | Application | Python, Flask, Gunicorn |
 | Database | Azure SQL |
@@ -418,6 +480,7 @@ kubectl port-forward svc/grafana 3000:3000 -n monitoring
   <b>Built with security-first principles for a zero-trust, production-grade cloud environment</b><br><br>
   <a href="#architecture">Architecture</a> •
   <a href="#security-architecture">Security</a> •
+  <a href="#runtime-detection--automated-response">Detection</a> •
   <a href="#observability-stack">Observability</a> •
   <a href="#cicd-pipeline">CI/CD</a> •
   <a href="#live-demo">Demo</a>

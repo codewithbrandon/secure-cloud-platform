@@ -1,0 +1,262 @@
+// ============================================================
+// Analytics Rule: AKS Unauthorized Pod Exec Detection
+// ============================================================
+//
+// Description:   Detects unauthorized interactive exec sessions into
+//                Kubernetes pods via kubectl or direct API clients.
+//                Covers post-compromise lateral movement and container
+//                breakout scenarios where an attacker has already
+//                obtained credentials and is exploring the cluster.
+//
+// Data Source:   AKSAudit
+//                (Resource-Specific Diagnostic Logs — preferred over
+//                 AzureDiagnostics for schema stability and performance)
+//
+// Prerequisite:  AKS Diagnostic Settings must be configured:
+//                  Category:    kube-audit (Resource-Specific)
+//                  Destination: Log Analytics Workspace
+//                  Retention:   >= 90 days recommended (compliance)
+//
+// Sentinel Rule Config:
+//                  Query Frequency:   5 minutes
+//                  Query Period:      5 minutes
+//                  Alert Threshold:   > 0 results
+//                  Event Grouping:    Alert per row (per-event granularity)
+//                  Suppression:       Disabled (every exec matters)
+//
+// MITRE ATT&CK:
+//   - TA0002  Execution
+//   - T1609   Container Administration Command
+//   - T1611   Escape to Host (if exec'd into privileged pod)
+//   - TA0008  Lateral Movement
+//   - T1021   Remote Services (using exec as shell access)
+//
+// Severity:      High
+// Response SLA:  15 minutes (acknowledge), 60 minutes (contain)
+//
+// Entity Mapping (configure in Sentinel Analytics Rule UI):
+//   Account    → ActorUsername
+//   IP         → SourceIPs
+//   CloudResource → ClusterResourceId
+//
+// Author:        Platform Security Engineering
+// Last Updated:  2026-02-19
+// ============================================================
+
+// ── Tuning Parameters ────────────────────────────────────────────
+// Baseline these against your environment before going live.
+// Review monthly — authorized users and namespaces change.
+
+let LookbackPeriod = 5m;
+
+let AuthorizedExecUsers = dynamic([
+    // CI/CD service accounts with explicit exec authorization
+    "system:serviceaccount:devops:jenkins-deployer",
+    "system:serviceaccount:monitoring:prometheus-agent",
+    // Add additional authorized identities from your RBAC review
+    // Format: "system:serviceaccount:<namespace>:<service-account-name>"
+]);
+
+let AuthorizedExecNamespaces = dynamic([
+    // Namespaces where exec is operationally expected.
+    // Keep this list small — prefer alerting over over-suppression.
+    "debug",          // Ephemeral debug namespace if used by your org
+    "chaos"           // Chaos engineering namespace if applicable
+    // DO NOT add production, payments, secrets, or default here.
+]);
+
+let SensitiveNamespaces = dynamic([
+    // High-value targets — exec here is always Critical severity.
+    // Ensure these match your actual namespace naming conventions.
+    "production", "prod", "prd",
+    "payments", "payment",
+    "secrets", "vault",
+    "cert-manager",
+    "istio-system"
+]);
+
+// ── Detection Query ───────────────────────────────────────────────
+AKSAudit
+| where TimeGenerated >= ago(LookbackPeriod)
+
+// Stage filter: only process fully completed requests.
+// "ResponseComplete" is emitted once the API server has sent
+// its full response. Filtering here prevents duplicate alerts
+// for the same event (K8s emits RequestReceived + ResponseComplete).
+| where Stage =~ "ResponseComplete"
+
+// Core exec signal:
+// The Kubernetes API models kubectl exec as an HTTP POST to
+// /api/v1/namespaces/{ns}/pods/{name}/exec
+// This is audited as: Resource=pods, Subresource=exec, Verb=create
+// A successful exec upgrades to WebSocket/SPDY → ResponseStatus 101
+| where ObjectRef_Resource =~ "pods"
+    and ObjectRef_Subresource =~ "exec"
+    and Verb =~ "create"
+
+// ── Identity Filtering ────────────────────────────────────────────
+// Exclude system components that legitimately use exec mechanisms
+// (liveness probes, node-level operations, service mesh sidecars).
+// These exclusions are based on Kubernetes core component identity.
+
+| where User_Username !startswith "system:node:"
+    and User_Username !startswith "system:serviceaccount:kube-system:kube-proxy"
+    and User_Username !startswith "system:serviceaccount:kube-system:calico-node"
+    and User_Username !startswith "system:serviceaccount:kube-system:coredns"
+    and User_Username !startswith "system:serviceaccount:kube-system:metrics-server"
+    and User_Username !startswith "system:serviceaccount:kube-system:azure-"
+    and User_Username !startswith "system:serviceaccount:aks-"
+    // Exclude AKS managed identity operations
+    and User_Username !contains "aks-agentpool"
+    and User_Username !contains "omsagent"
+
+// Exclude authorized users defined in the tuning section above
+| where User_Username !in (AuthorizedExecUsers)
+
+// Exclude exec from explicitly authorized namespaces
+| where ObjectRef_Namespace !in (AuthorizedExecNamespaces)
+
+// ── Signal Enrichment ─────────────────────────────────────────────
+
+// Detect kubectl vs. programmatic API access
+// kubectl sends a recognizable user-agent string.
+// Go-http-client indicates direct SDK or script usage.
+| extend IsKubectl     = UserAgent contains "kubectl"
+| extend IsGoClient    = UserAgent contains "Go-http-client"
+                         or UserAgent contains "python-requests"
+                         or UserAgent contains "curl"
+| extend IsInteractive = IsKubectl or IsGoClient
+
+// Anonymous access: always treat as Critical — no auth means
+// either a misconfigured RBAC or an unauthenticated API endpoint.
+| extend IsAnonymous = User_Username =~ "system:anonymous"
+    or isempty(User_Username)
+    or (isempty(tostring(User_Groups)) and User_Username startswith "system:")
+
+// Sensitive namespace flag for severity escalation
+| extend IsSensitiveNamespace = ObjectRef_Namespace in (SensitiveNamespaces)
+
+// Response code semantics for Kubernetes exec:
+//   101 = Switching Protocols — exec stream established (SUCCESS)
+//   200 = OK — exec completed
+//   400 = Bad Request — malformed exec request
+//   403 = Forbidden — RBAC denied (exec attempted but blocked)
+//   404 = Pod not found
+//   401 = Unauthorized — no/invalid credentials
+| extend ExecSucceeded = ResponseStatus_Code in (101, 200)
+| extend ExecBlocked   = ResponseStatus_Code in (401, 403)
+
+// Extract exec command if present in the request URI or params
+// (Available when audit log policy captures RequestObject)
+| extend ExecCommandRaw = tostring(RequestObject)
+
+// ── Risk Scoring ──────────────────────────────────────────────────
+// Composite score (0–100) used for triage prioritization.
+// Tune thresholds based on your environment's noise profile.
+| extend RiskScore = case(
+    // Tier 1: Critical — immediate response required
+    IsAnonymous and ExecSucceeded,                    100,  // Unauthenticated exec succeeded
+    IsSensitiveNamespace and ExecSucceeded,            95,  // Exec into production/payments/secrets
+    IsAnonymous,                                       85,  // Unauthenticated attempt (even if blocked)
+
+    // Tier 2: High — investigate within SLA
+    IsKubectl and ExecSucceeded and IsSensitiveNamespace, 90,
+    IsKubectl and ExecSucceeded,                       75,  // Interactive kubectl exec succeeded
+    IsGoClient and ExecSucceeded,                      70,  // Programmatic exec succeeded
+
+    // Tier 3: Medium — review and validate
+    IsKubectl and ExecBlocked,                         55,  // kubectl attempt was blocked (recon signal)
+    IsInteractive,                                     50,  // Exec signal from interactive tool
+    ExecSucceeded,                                     45,  // Unknown client exec succeeded
+
+    // Tier 4: Low — informational
+    30                                                      // All other exec audit events
+)
+
+// Surface only meaningful risk signals
+| where RiskScore >= 45
+    or IsAnonymous
+    or IsSensitiveNamespace
+
+// ── Alert Severity Mapping ────────────────────────────────────────
+| extend AlertSeverity = case(
+    RiskScore >= 90, "Critical",
+    RiskScore >= 70, "High",
+    RiskScore >= 50, "Medium",
+    "Low"
+)
+
+// ── Final Projection ──────────────────────────────────────────────
+| project
+    TimeGenerated,
+
+    // === Identity Context ===
+    ActorUsername       = User_Username,
+    ActorGroups         = tostring(User_Groups),
+    UserAgent,
+    SourceIPs           = tostring(SourceIps),
+
+    // === Target Context ===
+    TargetPod           = ObjectRef_Name,
+    TargetNamespace     = ObjectRef_Namespace,
+    TargetContainer     = tostring(ObjectRef_FieldSelector),
+
+    // === Request Context ===
+    Verb,
+    Stage,
+    ExecCommandRaw,
+
+    // === Outcome ===
+    ResponseCode        = ResponseStatus_Code,
+    ResponseMessage     = tostring(ResponseStatus_Message),
+    ExecSucceeded,
+    ExecBlocked,
+
+    // === Risk Assessment ===
+    RiskScore,
+    AlertSeverity,
+    IsAnonymous,
+    IsKubectl,
+    IsSensitiveNamespace,
+
+    // === MITRE ATT&CK ===
+    MitreTactic         = "Execution / Lateral Movement",
+    MitreTechnique      = "T1609 - Container Administration Command",
+    MitreNote           = iff(IsSensitiveNamespace or IsKubectl,
+                              "Potential T1611 - Escape to Host if pod is privileged",
+                              ""),
+
+    // === Cluster Context ===
+    ClusterResourceId   = ResourceId,
+    AuditEventId        = AuditID,
+
+    // === Incident Title (used in Sentinel alert template) ===
+    // Format: [Severity] Actor → Namespace/PodName [flags]
+    IncidentTitle = strcat(
+        "[K8s Exec | ", AlertSeverity, "] ",
+        iff(IsAnonymous, "[ANON] ", ""),
+        iff(IsSensitiveNamespace, "[SENSITIVE NS] ", ""),
+        iff(ExecSucceeded, "[SUCCESS] ", "[BLOCKED] "),
+        User_Username, " → ",
+        ObjectRef_Namespace, "/", ObjectRef_Name
+    )
+
+// ── Sort Order ────────────────────────────────────────────────────
+// Critical and high-risk events surface first for triage.
+| order by RiskScore desc, TimeGenerated desc
+
+// ── Usage Notes ───────────────────────────────────────────────────
+// 1. SAFE SIMULATION: To test this rule without real cluster access,
+//    inject a synthetic audit log row into Log Analytics using
+//    the Data Collector API with matching field names.
+//
+// 2. TUNING: After the first week of deployment, run the query with
+//    RiskScore >= 0 and review suppressed events. Add legitimate
+//    service accounts to AuthorizedExecUsers as needed.
+//
+// 3. AUTOMATION: Connect this analytics rule to a Logic App playbook
+//    that calls the AKS API to cordon the pod and notify the SOC.
+//
+// 4. COVERAGE GAPS: This query does not cover exec via the
+//    Kubernetes Dashboard UI. Ensure Dashboard is disabled or
+//    has its own audit path in your environment.
