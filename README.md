@@ -18,15 +18,15 @@ DevSecOps, and full-stack observability.
 ## What This Demonstrates
 
 This project is an end-to-end reference implementation of a secure, observable,
-production-ready cloud platform. It is not a tutorial — every component reflects
+production-ready cloud platform. It is not a tutorial   every component reflects
 a deliberate architectural decision.
 
 | Capability | Implementation |
 |---|---|
 | Zero-trust networking | Default-deny NetworkPolicies across all namespaces |
 | Defense in depth | Security controls at network, identity, container, CI/CD, and runtime layers |
-| Runtime detection | Microsoft Sentinel + AKS audit logs — exec, privileged pods, RBAC escalation |
-| DevSecOps | Security gates block every pipeline stage — not just deployment |
+| Runtime detection | Microsoft Sentinel + AKS audit logs   exec, privileged pods, RBAC escalation |
+| DevSecOps | Security gates block every pipeline stage   not just deployment |
 | Full observability | Prometheus + Grafana + Alertmanager with auto-provisioned dashboards |
 | Infrastructure as Code | 71 Azure resources, all Kubernetes manifests, all pipeline config |
 | Compliance-ready | PCI-DSS, SOC 2, HIPAA control mapping |
@@ -70,7 +70,7 @@ a deliberate architectural decision.
 └─────────────────────────────────┴──────────────────────────────────────┘
 ```
 
-### Deployed Resources — 71 Total
+### Deployed Resources   71 Total
 
 | Category | Resources |
 |---|---|
@@ -90,7 +90,7 @@ a deliberate architectural decision.
 ```
 Layer               Control
 ─────────────────────────────────────────────────────────────
-Detect & Respond    Microsoft Sentinel — KQL analytics rules (5-min polling)
+Detect & Respond    Microsoft Sentinel   KQL analytics rules (5-min polling)
                     AKS audit logs → exec detection, privileged pod, RBAC escalation
                     Automated incident response via Logic App playbooks
 
@@ -115,10 +115,10 @@ Data                TDE encryption at rest
                     TLS 1.2+ in transit
                     Key Vault for all secrets (no plaintext)
 
-CI/CD               Secrets scanning (gitleaks) — blocks on detect
-                    SAST (bandit) — blocks on HIGH severity
+CI/CD               Secrets scanning (gitleaks)   blocks on detect
+                    SAST (bandit)   blocks on HIGH severity
                     Dependency audit (pip-audit)
-                    Container scanning (Trivy) — blocks on CRITICAL/HIGH
+                    Container scanning (Trivy)   blocks on CRITICAL/HIGH
 ```
 
 ### Threat Model
@@ -146,20 +146,20 @@ Full Prometheus + Grafana + Alertmanager deployment in a dedicated
 | Component | Version | Role |
 |---|---|---|
 | Prometheus | v2.48.0 | Metrics collection and storage (15-day TSDB) |
-| Grafana | v10.2.2 | Visualization — auto-provisioned dashboards |
+| Grafana | v10.2.2 | Visualization   auto-provisioned dashboards |
 | Alertmanager | v0.26.0 | Alert routing (critical → webhook, warning → email) |
 | kube-state-metrics | v2.10.1 | Kubernetes object state metrics |
 | node-exporter | v1.7.0 | Host-level hardware and OS metrics |
 
 ### Security Dashboard Panels
 
-- Request rate (req/s) — traffic baseline and anomaly detection
-- Error rate (%) — application health, attack indicator
-- P95 / P99 response time — performance and DoS detection
-- Auth failure rate — brute force indicator
-- Pod restarts — crash loop / exploitation indicator
-- CPU / memory utilization — cryptomining / resource exhaustion
-- Active pods by namespace — deployment visibility
+- Request rate (req/s)   traffic baseline and anomaly detection
+- Error rate (%)   application health, attack indicator
+- P95 / P99 response time   performance and DoS detection
+- Auth failure rate   brute force indicator
+- Pod restarts   crash loop / exploitation indicator
+- CPU / memory utilization   cryptomining / resource exhaustion
+- Active pods by namespace   deployment visibility
 
 ### Alert Routing
 
@@ -178,7 +178,7 @@ Alert fires
 
 ## CI/CD Pipeline
 
-11-stage Jenkins DevSecOps pipeline — security gates run on every branch,
+11-stage Jenkins DevSecOps pipeline   security gates run on every branch,
 deployment runs on `main` only.
 
 ```
@@ -236,7 +236,7 @@ deployment runs on `main` only.
 
 ### Overview
 
-This platform implements a **Runtime Detection & Response** layer using Microsoft Sentinel as the SIEM/SOAR engine, backed by AKS native audit logging. The layer operates continuously on live cluster telemetry — independent of build-time scanning or admission controls — ensuring that post-compromise activity is detected even when an attacker uses legitimate credentials or bypasses static controls.
+This platform implements a **Runtime Detection & Response** layer using Microsoft Sentinel as the SIEM/SOAR engine, backed by AKS native audit logging. The layer operates continuously on live cluster telemetry   independent of build-time scanning or admission controls   ensuring that post-compromise activity is detected even when an attacker uses legitimate credentials or bypasses static controls.
 
 ### Detection Architecture
 
@@ -258,7 +258,7 @@ AKS API Server → kube-audit logs → Diagnostic Settings
 
 ### Why Runtime Detection Matters
 
-Shift-left security (image scanning, IaC linting, admission policies) operates on known-bad patterns at build and deploy time. Runtime detection operates in the opposite direction: it assumes that a well-resourced attacker has already bypassed preventive controls — through a stolen kubeconfig, a compromised CI/CD token, or a zero-day — and focuses entirely on detecting the **behavior** of post-compromise activity.
+Shift-left security (image scanning, IaC linting, admission policies) operates on known-bad patterns at build and deploy time. Runtime detection operates in the opposite direction: it assumes that a well-resourced attacker has already bypassed preventive controls   through a stolen kubeconfig, a compromised CI/CD token, or a zero-day   and focuses entirely on detecting the **behavior** of post-compromise activity.
 
 A `kubectl exec` command that reaches a production pod leaves a 5-minute detection window before an attacker can access mounted secrets or attempt a container escape. This layer is designed to close that window with automated alerting and a structured SOC runbook.
 
@@ -267,9 +267,9 @@ A `kubectl exec` command that reaches a production pod leaves a 5-minute detecti
 On detection, the platform supports:
 
 - **Namespace quarantine** via deny-all `NetworkPolicy` (preserves pod for forensics)
-- **Credential invalidation** — Azure AD session revocation + Kubernetes SA deletion
+- **Credential invalidation**   Azure AD session revocation + Kubernetes SA deletion
 - **Secret rotation** via Azure Key Vault + Kubernetes secret update
-- **RBAC remediation** — binding deletion + least-privilege replacement
+- **RBAC remediation**   binding deletion + least-privilege replacement
 - **Node draining** for confirmed node-level compromise
 
 See [`docs/detections-runtime.md`](docs/detections-runtime.md) for architecture detail and attack simulation guide.
@@ -363,13 +363,13 @@ secure-cloud-platform/
 │   └── Jenkinsfile             # 11-stage DevSecOps pipeline
 ├── sentinel/                   # Runtime detection layer (Microsoft Sentinel)
 │   ├── kql/
-│   │   ├── aks_pod_exec_detection.kql      # T1609 — unauthorized exec detection
-│   │   └── privileged_pod_detection.kql    # T1611/T1078 — privileged pod & RBAC
+│   │   ├── aks_pod_exec_detection.kql      # T1609   unauthorized exec detection
+│   │   └── privileged_pod_detection.kql    # T1611/T1078   privileged pod & RBAC
 │   └── analytics-rules/
 │       └── pod-exec-analytics-rule.json    # ARM template for Sentinel rule deploy
 ├── docs/
 │   ├── detections-runtime.md               # Architecture, log setup, simulation guide
-│   └── incident-response-runbook.md        # SOC runbook — triage → contain → recover
+│   └── incident-response-runbook.md        # SOC runbook   triage → contain → recover
 └── ansible/
     └── playbooks/
         └── harden-jenkins.yaml
@@ -402,7 +402,7 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
-### Application + Monitoring (Jenkins — automated on push to main)
+### Application + Monitoring (Jenkins   automated on push to main)
 
 Every merge to `main` triggers the full 11-stage pipeline which deploys
 both the application stack and the monitoring stack automatically.
