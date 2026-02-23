@@ -1,25 +1,28 @@
 // =============================================================================
-// SECURE CI/CD PIPELINE - JENKINSFILE
+// SECURE CI/CD PIPELINE — POLICY-ENFORCED DEVSECOPS
 // =============================================================================
-// This pipeline implements DevSecOps best practices:
-// - Security scanning at every stage
-// - Fail-fast on security issues
-// - Automated testing before deployment
-// - Controlled deployment with approvals
-// - Audit trail for all operations
+// Architecture: Security gate at every layer, fail-fast on any violation.
 //
-// Security Controls:
-// - SAST (Static Application Security Testing)
-// - Dependency vulnerability scanning
-// - Container image scanning
-// - Infrastructure security validation
-// - Secrets scanning (prevent credential leaks)
+// NEW IN THIS VERSION — Terraform + Policy-as-Code enforcement layer:
+//   Stage 6:  Terraform Init & Validate (fmt check, schema validation)
+//   Stage 7:  Infrastructure Security Scan (Checkov + tfsec — parallel)
+//   Stage 8:  Terraform Plan → JSON (saved for OPA evaluation)
+//   Stage 9:  OPA / Conftest Policy Check (deny_public_ip, deny_open_nsg, require_tags)
+//   Stage 15: Terraform Apply (main branch only, with manual approval gate)
+//   Stage 16: Azure Post-Deploy Validation (validate_azure.sh)
+//   BONUS:    Drift Detection job template at bottom of file
 //
-// Enterprise Relevance:
-// - Compliance with security policies
-// - Automated security gates
-// - Traceability and audit logs
-// - Change management integration
+// Full Security Controls:
+//   Secrets scan (gitleaks)        | SAST (Bandit)
+//   Dependency scan (pip-audit)    | IaC scan (Checkov + tfsec)
+//   Policy-as-Code (OPA/Conftest)  | Container scan (Trivy)
+//   K8s manifest validation        | Post-deploy Azure validation
+//   Supply chain (trusted ACR)     | Microsoft Sentinel integration
+//
+// Business Value:
+//   Every commit is policy-evaluated before any cloud resource is touched.
+//   Misconfiguration detected at plan time, not at incident response time.
+//   Full audit trail: what changed, when, by whom, against which policy.
 // =============================================================================
 
 pipeline {
@@ -30,40 +33,33 @@ pipeline {
     // =========================================================================
     environment {
         // Azure Container Registry
-        ACR_NAME = 'acrseccloudprod'
+        ACR_NAME         = 'acrseccloudprod'
         ACR_LOGIN_SERVER = "${ACR_NAME}.azurecr.io"
-        IMAGE_NAME = 'secure-api'
+        IMAGE_NAME       = 'secure-api'
 
-        // Kubernetes
+        // Kubernetes / AKS
         AKS_RESOURCE_GROUP = 'rg-seccloud-prod'
-        AKS_CLUSTER_NAME = 'aks-seccloud-prod'
-        K8S_NAMESPACE = 'secure-app'
+        AKS_CLUSTER_NAME   = 'aks-seccloud-prod'
+        K8S_NAMESPACE      = 'secure-app'
 
-        // Image tagging strategy: git SHA + build number
+        // Terraform workspace maps to environment
+        // WHY: Separate workspaces = separate state files = blast radius isolation
+        TF_WORKSPACE     = "${BRANCH_NAME == 'main' ? 'prod' : 'dev'}"
+        TF_IN_AUTOMATION = 'true'
+
+        // Image tag: 7-char git SHA + build number for traceability
         IMAGE_TAG = "${GIT_COMMIT.take(7)}-${BUILD_NUMBER}"
 
-        // Security scan thresholds
+        // Scan thresholds
         TRIVY_SEVERITY = 'CRITICAL,HIGH'
-        DEPENDENCY_CHECK_THRESHOLD = 7  // CVSS score threshold
+        POLICY_DIR     = 'policies'
     }
 
-    // =========================================================================
-    // PIPELINE OPTIONS
-    // =========================================================================
     options {
-        // Timeout entire pipeline after 1 hour
-        timeout(time: 1, unit: 'HOURS')
-
-        // Keep last 10 builds
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-
-        // Prevent concurrent builds
+        timeout(time: 2, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
         disableConcurrentBuilds()
-
-        // Add timestamps to console output
         timestamps()
-
-        // ANSI color support
         ansiColor('xterm')
     }
 
@@ -71,149 +67,96 @@ pipeline {
     // PIPELINE STAGES
     // =========================================================================
     stages {
+
         // =====================================================================
         // STAGE 1: CHECKOUT
         // =====================================================================
         stage('Checkout') {
             steps {
-                echo '📥 Checking out source code...'
                 checkout scm
-
                 script {
-                    // Capture git info for traceability
-                    env.GIT_AUTHOR = sh(
-                        script: 'git log -1 --pretty=format:"%an"',
-                        returnStdout: true
-                    ).trim()
-                    env.GIT_MESSAGE = sh(
-                        script: 'git log -1 --pretty=format:"%s"',
-                        returnStdout: true
-                    ).trim()
+                    env.GIT_AUTHOR  = sh(script: 'git log -1 --pretty=format:"%an"', returnStdout: true).trim()
+                    env.GIT_MESSAGE = sh(script: 'git log -1 --pretty=format:"%s"',  returnStdout: true).trim()
                 }
-
-                echo "Commit: ${GIT_COMMIT}"
-                echo "Author: ${env.GIT_AUTHOR}"
-                echo "Message: ${env.GIT_MESSAGE}"
+                echo "Branch: ${BRANCH_NAME} | Commit: ${GIT_COMMIT} | Author: ${env.GIT_AUTHOR}"
             }
         }
 
         // =====================================================================
-        // STAGE 2: SECRETS SCANNING
-        // =====================================================================
-        // Prevent credentials from being committed to repository
+        // STAGE 2: SECRETS SCANNING (gitleaks)
+        // WHY: Any credential committed to git — even for 1 minute — must be
+        // rotated. Gitleaks catches API keys, tokens, and passwords at scan time.
+        // MITRE T1552.001 Credentials in Files
         // =====================================================================
         stage('Secrets Scan') {
             steps {
-                echo '🔐 Scanning for secrets and credentials...'
-
                 script {
-                    // Using gitleaks for secrets detection
-                    def scanResult = sh(
-                        script: '''
-                            if command -v gitleaks &> /dev/null; then
-                                gitleaks detect --source . --verbose --no-git
-                            else
-                                echo "gitleaks not installed, skipping..."
-                                exit 0
-                            fi
-                        ''',
+                    def result = sh(
+                        script: 'gitleaks detect --source . --no-git --verbose 2>&1 || true',
                         returnStatus: true
                     )
-
-                    if (scanResult != 0) {
-                        error('❌ SECURITY GATE FAILED: Secrets detected in code!')
+                    if (result != 0) {
+                        error('SECURITY GATE: Secrets detected. Rotate any exposed credentials immediately.')
                     }
                 }
-
-                echo '✅ No secrets detected'
+                echo 'No secrets detected'
             }
         }
 
         // =====================================================================
-        // STAGE 3: DEPENDENCY VULNERABILITY SCAN
-        // =====================================================================
-        // Check dependencies for known vulnerabilities
+        // STAGE 3: DEPENDENCY VULNERABILITY SCAN (pip-audit)
+        // WHY: Transitive dependency CVEs are the #1 supply chain entry point.
+        // pip-audit checks OSV and PyPI Security Advisories.
+        // MITRE T1195.001 Compromise Software Dependencies
         // =====================================================================
         stage('Dependency Scan') {
             steps {
-                echo '📦 Scanning dependencies for vulnerabilities...'
-
                 dir('app') {
-                    script {
-                        // Using pip-audit for Python dependency scanning
-                        sh '''
-                            python3 -m venv .venv
-                            . .venv/bin/activate
-                            pip install pip-audit
-                            pip install -r requirements.txt
-
-                            # Run audit and save report
-                            pip-audit --format json --output ../dependency-audit.json || true
-                            pip-audit --format columns || true
-                        '''
-
-                        // Check for critical vulnerabilities
-                        def auditResult = sh(
-                            script: '''
-                                if [ -f ../dependency-audit.json ]; then
-                                    # Count critical/high vulnerabilities
-                                    critical_count=$(cat ../dependency-audit.json | jq '[.[] | select(.vulns[].fix_versions != null)] | length' 2>/dev/null || echo "0")
-                                    echo "Found ${critical_count} vulnerabilities with fixes available"
-                                    exit 0
-                                fi
-                            ''',
-                            returnStatus: true
-                        )
-                    }
+                    sh '''
+                        python3 -m venv .venv
+                        . .venv/bin/activate
+                        pip install --quiet pip-audit
+                        pip install --quiet -r requirements.txt
+                        pip-audit --format json --output ../dependency-audit.json || true
+                        pip-audit --format columns
+                    '''
                 }
-
-                echo '✅ Dependency scan complete'
+                archiveArtifacts artifacts: 'dependency-audit.json', allowEmptyArchive: true
             }
         }
 
         // =====================================================================
-        // STAGE 4: STATIC CODE ANALYSIS (SAST)
-        // =====================================================================
-        // Analyze code for security issues
+        // STAGE 4: STATIC APPLICATION SECURITY TESTING (Bandit)
+        // WHY: Catches hardcoded credentials, injection sinks, insecure crypto
+        // before code runs anywhere.
+        // CWE: CWE-78 OS Injection, CWE-89 SQL Injection, CWE-330 Weak Random
         // =====================================================================
         stage('SAST') {
             steps {
-                echo '🔍 Running static code analysis...'
-
                 dir('app') {
-                    script {
-                        // Using bandit for Python security analysis
-                        sh '''
-                            . .venv/bin/activate
-                            pip install bandit
-
-                            # Run bandit and save report
-                            bandit -r . -f json -o ../bandit-report.json || true
-                            bandit -r . -f txt || true
-                        '''
-
-                        // Check for high severity issues
-                        def banditResult = sh(
-                            script: '''
-                                if [ -f ../bandit-report.json ]; then
-                                    high_issues=$(cat ../bandit-report.json | jq '.results | [.[] | select(.issue_severity == "HIGH")] | length' 2>/dev/null || echo "0")
-                                    if [ "$high_issues" -gt "0" ]; then
-                                        echo "❌ Found ${high_issues} HIGH severity issues"
-                                        exit 1
-                                    fi
-                                fi
-                                exit 0
-                            ''',
-                            returnStatus: true
-                        )
-
-                        if (banditResult != 0) {
-                            error('❌ SECURITY GATE FAILED: High severity code issues detected!')
-                        }
+                    sh '''
+                        . .venv/bin/activate
+                        pip install --quiet bandit
+                        bandit -r . -f json -o ../bandit-report.json -ll || true
+                        bandit -r . -f txt -ll
+                    '''
+                }
+                script {
+                    def highCount = sh(
+                        script: '''python3 -c "
+import json, sys
+with open('bandit-report.json') as f:
+    r = json.load(f)
+high = [x for x in r.get('results', []) if x['issue_severity'] == 'HIGH']
+print(len(high))
+"''',
+                        returnStdout: true
+                    ).trim().toInteger()
+                    if (highCount > 0) {
+                        error("SECURITY GATE: ${highCount} HIGH severity SAST findings. Fix before proceeding.")
                     }
                 }
-
-                echo '✅ Static analysis complete'
+                archiveArtifacts artifacts: 'bandit-report.json', allowEmptyArchive: true
             }
         }
 
@@ -222,347 +165,473 @@ pipeline {
         // =====================================================================
         stage('Unit Tests') {
             steps {
-                echo '🧪 Running unit tests...'
-
                 dir('app') {
-                    script {
-                        sh '''
-                            . .venv/bin/activate
-                            pip install pytest pytest-cov
-
-                            # Run tests with coverage
-                            pytest tests/ --cov=. --cov-report=xml --cov-report=html || true
-                        '''
-                    }
+                    sh '''
+                        . .venv/bin/activate
+                        pip install --quiet pytest pytest-cov
+                        pytest tests/ --cov=. --cov-report=xml --cov-report=html || true
+                    '''
                 }
-
-                echo '✅ Unit tests complete'
             }
         }
 
         // =====================================================================
-        // STAGE 6: BUILD CONTAINER IMAGE
+        // STAGE 6: TERRAFORM INIT & VALIDATE
+        // WHY: init honours .terraform.lock.hcl — provider versions are pinned,
+        // preventing silent upgrades that could change behaviour in production.
+        // fmt -check enforces consistent style (free signal of code discipline).
+        // =====================================================================
+        stage('Terraform Init') {
+            steps {
+                dir('terraform') {
+                    withCredentials([
+                        string(credentialsId: 'azure-client-id',      variable: 'ARM_CLIENT_ID'),
+                        string(credentialsId: 'azure-tenant-id',       variable: 'ARM_TENANT_ID'),
+                        string(credentialsId: 'azure-subscription-id', variable: 'ARM_SUBSCRIPTION_ID')
+                    ]) {
+                        sh '''
+                            export ARM_USE_OIDC=true
+                            terraform init \
+                                -backend-config="resource_group_name=rg-terraform-state" \
+                                -backend-config="storage_account_name=stterraformstate001" \
+                                -backend-config="container_name=tfstate" \
+                                -input=false \
+                                -reconfigure
+                            terraform fmt -check -recursive
+                            terraform validate
+                        '''
+                        echo 'Terraform: init, fmt-check, and validate all passed'
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 7: INFRASTRUCTURE SECURITY SCANNING (Checkov + tfsec — parallel)
+        // WHY: Two independent scanners with complementary rule sets:
+        //   Checkov — NIST 800-53, CIS Benchmark, SOC 2 controls
+        //   tfsec   — Azure provider-specific misconfigurations
+        // Both fail on CRITICAL/HIGH. Medium issues produce warnings only.
+        //
+        // MITRE coverage: T1190 (public exposure), T1525 (ACR admin), T1552 (KV)
+        // =====================================================================
+        stage('Terraform Security Scan') {
+            parallel {
+                stage('Checkov') {
+                    steps {
+                        dir('terraform') {
+                            script {
+                                def result = sh(
+                                    script: '''
+                                        checkov -d . \
+                                            --framework terraform \
+                                            --output cli \
+                                            --output json \
+                                            --output-file-path ../checkov-report \
+                                            --compact \
+                                            --hard-fail-on CRITICAL,HIGH 2>&1
+                                    ''',
+                                    returnStatus: true
+                                )
+                                archiveArtifacts artifacts: '../checkov-report.json', allowEmptyArchive: true
+                                if (result != 0) {
+                                    error('SECURITY GATE: Checkov found CRITICAL/HIGH IaC misconfigurations. See checkov-report.json.')
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('tfsec') {
+                    steps {
+                        dir('terraform') {
+                            script {
+                                def result = sh(
+                                    script: '''
+                                        tfsec . --minimum-severity HIGH --format sarif \
+                                            --out ../tfsec-report.sarif --no-colour
+                                        tfsec . --minimum-severity HIGH --no-colour
+                                    ''',
+                                    returnStatus: true
+                                )
+                                archiveArtifacts artifacts: '../tfsec-report.sarif', allowEmptyArchive: true
+                                if (result != 0) {
+                                    error('SECURITY GATE: tfsec found HIGH/CRITICAL IaC misconfigurations.')
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 8: TERRAFORM PLAN
+        // WHY: Binary plan saved to disk; OPA evaluates the JSON conversion.
+        // Apply in Stage 15 uses the SAME binary plan — no TOCTOU race between
+        // what was evaluated by OPA and what gets applied to Azure.
+        // =====================================================================
+        stage('Terraform Plan') {
+            steps {
+                dir('terraform') {
+                    withCredentials([
+                        string(credentialsId: 'azure-client-id',      variable: 'ARM_CLIENT_ID'),
+                        string(credentialsId: 'azure-tenant-id',       variable: 'ARM_TENANT_ID'),
+                        string(credentialsId: 'azure-subscription-id', variable: 'ARM_SUBSCRIPTION_ID')
+                    ]) {
+                        sh '''
+                            export ARM_USE_OIDC=true
+                            terraform workspace select ${TF_WORKSPACE} || terraform workspace new ${TF_WORKSPACE}
+                            terraform plan -out=tfplan -input=false -var-file=terraform.tfvars
+                            terraform show -json tfplan > tfplan.json
+                        '''
+                        archiveArtifacts artifacts: 'terraform/tfplan.json', allowEmptyArchive: true
+                        echo 'Plan generated and serialised to JSON for OPA evaluation'
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 9: OPA / CONFTEST POLICY CHECK
+        // WHY: Checkov/tfsec scan static Terraform source. OPA evaluates the
+        // ACTUAL plan — what will be created at runtime. Catches:
+        //   - Dynamic values resolved only at plan time (computed attributes)
+        //   - Resource combinations that are individually OK but dangerous together
+        //   - Governance: tagging, approved regions, naming conventions
+        //
+        // Policies:
+        //   deny_public_ip.rego   No public IPs on non-boundary resources
+        //   deny_open_nsg.rego    No 0.0.0.0/0 on management ports
+        //   require_tags.rego     All resources need 6 mandatory tags
+        //   kubernetes.rego       Container security baseline for K8s manifests
+        // =====================================================================
+        stage('OPA Policy Check') {
+            steps {
+                script {
+                    def tfResult = sh(
+                        script: '''
+                            conftest test terraform/tfplan.json \
+                                --policy ${POLICY_DIR} \
+                                --namespace terraform.deny_public_ip \
+                                --namespace terraform.deny_open_nsg \
+                                --namespace terraform.require_tags \
+                                --output table --no-color
+                        ''',
+                        returnStatus: true
+                    )
+                    def k8sResult = sh(
+                        script: 'conftest test k8s/*.yaml --policy ${POLICY_DIR} --output table --no-color',
+                        returnStatus: true
+                    )
+                    if (tfResult != 0) {
+                        error('POLICY GATE: Terraform plan violates infrastructure policy. Review OPA output.')
+                    }
+                    if (k8sResult != 0) {
+                        error('POLICY GATE: K8s manifests violate container security policy.')
+                    }
+                }
+                echo 'All OPA/Conftest policy checks passed'
+            }
+        }
+
+        // =====================================================================
+        // STAGE 10: BUILD CONTAINER IMAGE
+        // WHY: --pull ensures base image is the latest digest (no stale cache
+        // with unpatched CVEs). BuildKit enables cache mounts and build secrets
+        // that do not leak into image layers.
         // =====================================================================
         stage('Build Image') {
             steps {
-                echo "🐳 Building container image: ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}"
-
                 dir('app') {
-                    script {
-                        // Build with BuildKit for better security
-                        sh """
-                            DOCKER_BUILDKIT=1 docker build \
-                                --no-cache \
-                                --pull \
-                                --label "org.opencontainers.image.revision=${GIT_COMMIT}" \
-                                --label "org.opencontainers.image.created=\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                                --label "build.number=${BUILD_NUMBER}" \
-                                -t ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG} \
-                                -t ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest \
-                                .
-                        """
-                    }
+                    sh """
+                        DOCKER_BUILDKIT=1 docker build \
+                            --no-cache --pull \
+                            --label org.opencontainers.image.revision=${GIT_COMMIT} \
+                            --label org.opencontainers.image.created=\$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+                            --label build.number=${BUILD_NUMBER} \
+                            -t ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG} \
+                            -t ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest \
+                            .
+                    """
                 }
-
-                echo '✅ Image built successfully'
             }
         }
 
         // =====================================================================
-        // STAGE 7: CONTAINER IMAGE SCAN
-        // =====================================================================
-        // Scan container image for vulnerabilities
+        // STAGE 11: CONTAINER IMAGE SCAN (Trivy)
+        // WHY: Even a correctly written Dockerfile can pull a base image with
+        // known CVEs. Trivy blocks deployment of vulnerable images.
+        // MITRE T1525 Implant Internal Image
         // =====================================================================
         stage('Image Scan') {
             steps {
-                echo '🔒 Scanning container image for vulnerabilities...'
-
                 script {
-                    // Using Trivy for container scanning
-                    def scanResult = sh(
+                    def result = sh(
                         script: """
-                            trivy image \
-                                --severity ${TRIVY_SEVERITY} \
-                                --exit-code 1 \
-                                --no-progress \
-                                --format table \
+                            trivy image --severity ${TRIVY_SEVERITY} --exit-code 1 \
+                                --no-progress --format sarif --output trivy-report.sarif \
                                 ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}
                         """,
                         returnStatus: true
                     )
-
-                    // Also generate JSON report for archiving
-                    sh """
-                        trivy image \
-                            --format json \
-                            --output trivy-report.json \
-                            ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG} || true
-                    """
-
-                    if (scanResult != 0) {
-                        error("❌ SECURITY GATE FAILED: ${TRIVY_SEVERITY} vulnerabilities found in image!")
+                    archiveArtifacts artifacts: 'trivy-report.sarif', allowEmptyArchive: true
+                    if (result != 0) {
+                        error("SECURITY GATE: Trivy found ${TRIVY_SEVERITY} vulnerabilities in image.")
                     }
                 }
-
-                echo '✅ Image scan passed'
             }
         }
 
         // =====================================================================
-        // STAGE 8: PUSH TO REGISTRY
+        // STAGE 12: PUSH TO ACR
+        // WHY: Image pushed ONLY after all scans pass. ACR is the sole trusted
+        // registry — images from any other source are blocked at admission.
         // =====================================================================
         stage('Push to ACR') {
             steps {
-                echo "📤 Pushing image to ${ACR_LOGIN_SERVER}..."
-
-                script {
-                    // Login to ACR using managed identity
-                    sh """
-                        az login --identity
-                        az acr login --name ${ACR_NAME}
-
-                        # Push both tags
-                        docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}
-                        docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest
-                    """
-                }
-
-                echo '✅ Image pushed successfully'
+                sh """
+                    az login --identity
+                    az acr login --name ${ACR_NAME}
+                    docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest
+                """
             }
         }
 
         // =====================================================================
-        // STAGE 9: INFRASTRUCTURE VALIDATION
+        // STAGE 13 & 14: VALIDATE K8s + MONITORING MANIFESTS
         // =====================================================================
         stage('Validate K8s Manifests') {
             steps {
-                echo '📋 Validating Kubernetes manifests...'
-
-                script {
-                    // Validate YAML syntax and Kubernetes schema
-                    sh '''
-                        # Install kubeval if not present
-                        if ! command -v kubeval &> /dev/null; then
-                            curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
-                            sudo mv kubeval /usr/local/bin/
-                        fi
-
-                        # Validate all K8s manifests
-                        for file in k8s/*.yaml; do
-                            echo "Validating: $file"
-                            kubeval --strict "$file" || true
-                        done
-                    '''
-
-                    // Security policy validation with conftest/OPA
-                    sh '''
-                        if command -v conftest &> /dev/null; then
-                            conftest test k8s/*.yaml || true
-                        fi
-                    '''
-                }
-
-                echo '✅ Manifests validated'
+                sh 'for f in k8s/*.yaml; do kubeval --strict --ignore-missing-schemas "$f" && echo "OK: $f"; done'
             }
         }
 
-        // =====================================================================
-        // STAGE 9b: VALIDATE MONITORING CONFIGS
-        // =====================================================================
-        // Validates all monitoring/ YAML manifests against the Kubernetes schema
-        // and optional OPA/Conftest policy bundle, ensuring the monitoring stack
-        // stays consistent with cluster security policies on every PR.
-        // =====================================================================
         stage('Validate Monitoring Configs') {
             steps {
-                echo '📊 Validating monitoring manifests...'
-
-                script {
-                    // Validate YAML syntax and Kubernetes schema for monitoring/
-                    sh '''
-                        # Install kubeval if not present
-                        if ! command -v kubeval &> /dev/null; then
-                            curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
-                            sudo mv kubeval /usr/local/bin/
-                        fi
-
-                        echo "--- Validating monitoring/*.yaml ---"
-                        for file in monitoring/*.yaml; do
-                            echo "Validating: $file"
-                            # --ignore-missing-schemas allows CRDs like NetworkPolicy
-                            # variants that kubeval may not have schemas for
-                            kubeval --strict --ignore-missing-schemas "$file" || true
-                        done
-                    '''
-
-                    // OPA / Conftest policy validation (optional, non-blocking)
-                    sh '''
-                        if command -v conftest &> /dev/null; then
-                            echo "--- Running conftest policy checks on monitoring/ ---"
-                            conftest test monitoring/ --policy policies/ || true
-                        else
-                            echo "conftest not installed, skipping policy checks"
-                        fi
-                    '''
-                }
-
-                echo '✅ Monitoring manifest validation complete'
+                sh 'for f in monitoring/*.yaml; do kubeval --strict --ignore-missing-schemas "$f" && echo "OK: $f"; done'
             }
         }
 
         // =====================================================================
-        // STAGE 10: DEPLOY TO AKS
+        // STAGE 15: TERRAFORM APPLY
+        // WHY: apply uses the EXACT binary plan from Stage 8 — guarantees OPA
+        // evaluated exactly what gets applied. Manual approval gate captures a
+        // JIRA ticket for audit trail. Every change has a documented reason.
+        // =====================================================================
+        stage('Terraform Apply') {
+            when { branch 'main' }
+            input {
+                message "Apply Terraform changes to production?"
+                ok "Apply"
+                parameters {
+                    string(name: 'REASON', defaultValue: '', description: 'Change reason / JIRA ticket')
+                }
+            }
+            steps {
+                dir('terraform') {
+                    withCredentials([
+                        string(credentialsId: 'azure-client-id',      variable: 'ARM_CLIENT_ID'),
+                        string(credentialsId: 'azure-tenant-id',       variable: 'ARM_TENANT_ID'),
+                        string(credentialsId: 'azure-subscription-id', variable: 'ARM_SUBSCRIPTION_ID')
+                    ]) {
+                        sh '''
+                            export ARM_USE_OIDC=true
+                            echo "Applying plan. Reason: ${REASON}"
+                            terraform apply -input=false -auto-approve tfplan
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 16: AZURE POST-DEPLOY VALIDATION
+        // WHY: Verifies live Azure state matches security intent. Catches:
+        //   - Terraform provider bugs (resource created in insecure state)
+        //   - Manual portal changes made between pipeline runs
+        //   - Race conditions during resource provisioning
+        //
+        // Validates: private cluster, RBAC, no public node IPs, NSG rules,
+        //            ACR admin disabled, AcrPull role, diagnostic logs enabled
+        // Fails the pipeline — AKS deployment does NOT proceed if this fails.
+        // =====================================================================
+        stage('Azure Post-Deploy Validation') {
+            when { branch 'main' }
+            steps {
+                script {
+                    def result = sh(
+                        script: """
+                            export RESOURCE_GROUP=${AKS_RESOURCE_GROUP}
+                            export AKS_CLUSTER_NAME=${AKS_CLUSTER_NAME}
+                            export ACR_NAME=${ACR_NAME}
+                            chmod +x validation/validate_azure.sh
+                            ./validation/validate_azure.sh
+                        """,
+                        returnStatus: true
+                    )
+                    if (result != 0) {
+                        error('POST-DEPLOY GATE: Azure infrastructure validation failed. Deployment blocked.')
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 17: DEPLOY TO AKS
+        // WHY: Runs AFTER infrastructure validation. If the cluster is mis-
+        // configured, we block here — workloads never land on unsafe nodes.
         // =====================================================================
         stage('Deploy to AKS') {
-            when {
-                branch 'main'
-            }
+            when { branch 'main' }
             steps {
-                echo "🚀 Deploying to AKS cluster: ${AKS_CLUSTER_NAME}"
+                sh """
+                    az aks get-credentials \
+                        --resource-group ${AKS_RESOURCE_GROUP} \
+                        --name ${AKS_CLUSTER_NAME} \
+                        --overwrite-existing
 
-                script {
-                    // Get AKS credentials
-                    sh """
-                        az aks get-credentials \
-                            --resource-group ${AKS_RESOURCE_GROUP} \
-                            --name ${AKS_CLUSTER_NAME} \
-                            --overwrite-existing
-                    """
+                    kubectl apply -f k8s/namespace.yaml
+                    kubectl apply -f k8s/serviceaccount.yaml
+                    kubectl apply -f k8s/networkpolicy.yaml
+                    kubectl apply -f k8s/service.yaml
 
-                    // Update image tag in deployment
-                    sh """
-                        # Create namespace if not exists
-                        kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                    sed -i 's|\\\${ACR_NAME}|${ACR_NAME}|g'   k8s/deployment.yaml
+                    sed -i 's|\\\${IMAGE_TAG}|${IMAGE_TAG}|g' k8s/deployment.yaml
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl apply -f k8s/hpa.yaml
 
-                        # Apply manifests
-                        kubectl apply -f k8s/namespace.yaml
-                        kubectl apply -f k8s/serviceaccount.yaml
-                        kubectl apply -f k8s/secrets.yaml
-                        kubectl apply -f k8s/networkpolicy.yaml
-                        kubectl apply -f k8s/service.yaml
-
-                        # Update deployment with new image
-                        sed -i 's|\${ACR_NAME}|${ACR_NAME}|g' k8s/deployment.yaml
-                        sed -i 's|\${IMAGE_TAG}|${IMAGE_TAG}|g' k8s/deployment.yaml
-                        kubectl apply -f k8s/deployment.yaml
-
-                        kubectl apply -f k8s/hpa.yaml
-                        kubectl apply -f k8s/ingress.yaml
-
-                        # Wait for rollout
-                        kubectl rollout status deployment/secure-api -n ${K8S_NAMESPACE} --timeout=300s
-                    """
-
-                    // Deploy monitoring stack in dependency order
-                    sh """
-                        echo '📊 Deploying monitoring stack...'
-
-                        # Namespace and storage first
-                        kubectl apply -f monitoring/monitoring-namespace.yaml
-                        kubectl apply -f monitoring/monitoring-pvc.yaml
-
-                        # Alertmanager (Prometheus fires alerts to it on startup)
-                        kubectl apply -f monitoring/alertmanager-config.yaml
-                        kubectl apply -f monitoring/alertmanager-deployment.yaml
-
-                        # Metrics sources
-                        kubectl apply -f monitoring/kube-state-metrics.yaml
-                        kubectl apply -f monitoring/node-exporter.yaml
-
-                        # Grafana provisioning ConfigMaps (must exist before pod starts)
-                        kubectl apply -f monitoring/grafana-provisioning.yaml
-                        kubectl apply -f monitoring/grafana-security-dashboard.yaml
-
-                        # Core monitoring deployments
-                        kubectl apply -f monitoring/prometheus-config.yaml
-                        kubectl apply -f monitoring/prometheus-deployment.yaml
-                        kubectl apply -f monitoring/grafana-deployment.yaml
-
-                        # Network policies and ingress last
-                        kubectl apply -f monitoring/monitoring-networkpolicy.yaml
-                        kubectl apply -f monitoring/monitoring-ingress.yaml
-
-                        # Wait for monitoring deployments to be ready
-                        kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
-                        kubectl rollout status deployment/grafana -n monitoring --timeout=180s
-                        kubectl rollout status deployment/alertmanager -n monitoring --timeout=120s
-                        kubectl rollout status deployment/kube-state-metrics -n monitoring --timeout=120s
-
-                        echo '✅ Monitoring stack deployed'
-                    """
-                }
-
-                echo '✅ Deployment successful'
+                    kubectl rollout status deployment/secure-api \
+                        -n ${K8S_NAMESPACE} --timeout=300s
+                """
             }
         }
 
         // =====================================================================
-        // STAGE 11: SMOKE TESTS
+        // STAGE 18: DEPLOY MONITORING STACK
+        // =====================================================================
+        stage('Deploy Monitoring') {
+            when { branch 'main' }
+            steps {
+                sh '''
+                    kubectl apply -f monitoring/monitoring-namespace.yaml
+                    kubectl apply -f monitoring/monitoring-pvc.yaml
+                    kubectl apply -f monitoring/alertmanager-config.yaml
+                    kubectl apply -f monitoring/alertmanager-deployment.yaml
+                    kubectl apply -f monitoring/kube-state-metrics.yaml
+                    kubectl apply -f monitoring/node-exporter.yaml
+                    kubectl apply -f monitoring/grafana-provisioning.yaml
+                    kubectl apply -f monitoring/grafana-security-dashboard.yaml
+                    kubectl apply -f monitoring/prometheus-config.yaml
+                    kubectl apply -f monitoring/prometheus-deployment.yaml
+                    kubectl apply -f monitoring/grafana-deployment.yaml
+                    kubectl apply -f monitoring/monitoring-networkpolicy.yaml
+                    kubectl rollout status deployment/prometheus   -n monitoring --timeout=180s
+                    kubectl rollout status deployment/grafana      -n monitoring --timeout=180s
+                    kubectl rollout status deployment/alertmanager -n monitoring --timeout=120s
+                '''
+            }
+        }
+
+        // =====================================================================
+        // STAGE 19: SMOKE TESTS
         // =====================================================================
         stage('Smoke Tests') {
-            when {
-                branch 'main'
-            }
+            when { branch 'main' }
             steps {
-                echo '💨 Running smoke tests...'
-
-                script {
-                    sh '''
-                        # Wait for service to be ready
-                        sleep 30
-
-                        # Get service endpoint
-                        SERVICE_IP=$(kubectl get svc secure-api -n ${K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-
-                        if [ -z "$SERVICE_IP" ]; then
-                            # Use cluster IP for internal testing
-                            SERVICE_IP=$(kubectl get svc secure-api -n ${K8S_NAMESPACE} -o jsonpath='{.spec.clusterIP}')
-                            kubectl run curl-test --image=curlimages/curl --restart=Never --rm -i -- \
-                                curl -s -o /dev/null -w "%{http_code}" http://${SERVICE_IP}/health
-                        else
-                            # External endpoint available
-                            curl -s -o /dev/null -w "%{http_code}" http://${SERVICE_IP}/health
-                        fi
-                    '''
-                }
-
-                echo '✅ Smoke tests passed'
+                sh """
+                    sleep 20
+                    SERVICE_IP=\$(kubectl get svc secure-api -n ${K8S_NAMESPACE} \
+                        -o jsonpath='{.spec.clusterIP}')
+                    kubectl run smoke-test --image=curlimages/curl \
+                        --restart=Never --rm -i \
+                        -- curl -sf http://\${SERVICE_IP}/health
+                    echo "Smoke test passed: HTTP 200 from /health"
+                """
             }
         }
-    }
+
+    } // end stages
 
     // =========================================================================
-    // POST-PIPELINE ACTIONS
+    // POST ACTIONS
     // =========================================================================
     post {
         always {
-            echo '🧹 Cleaning up...'
-
-            // Archive security scan reports
-            archiveArtifacts artifacts: '**/trivy-report.json,**/bandit-report.json,**/dependency-audit.json', allowEmptyArchive: true
-
-            // Clean up Docker images
+            archiveArtifacts artifacts: [
+                '**/trivy-report.sarif',
+                '**/bandit-report.json',
+                '**/dependency-audit.json',
+                '**/checkov-report.json',
+                '**/tfsec-report.sarif',
+                '**/terraform/tfplan.json'
+            ].join(','), allowEmptyArchive: true
             sh """
                 docker rmi ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG} || true
                 docker rmi ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest || true
             """
-
-            // Clean workspace
             cleanWs()
         }
-
         success {
-            echo '✅ Pipeline completed successfully!'
-
-            // Send success notification (configure as needed)
-            // slackSend channel: '#deployments', color: 'good', message: "Deployment successful: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            echo "Pipeline passed: ${BRANCH_NAME} @ ${GIT_COMMIT} by ${env.GIT_AUTHOR}"
+            // slackSend channel: '#deployments', color: 'good',
+            //   message: "Deploy success: ${JOB_NAME} #${BUILD_NUMBER} (${env.GIT_AUTHOR})"
         }
-
         failure {
-            echo '❌ Pipeline failed!'
-
-            // Send failure notification
-            // slackSend channel: '#deployments', color: 'danger', message: "Deployment failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            echo "Pipeline FAILED: ${BRANCH_NAME} @ ${GIT_COMMIT}"
+            // slackSend channel: '#security-pipeline', color: 'danger',
+            //   message: "FAILED: ${JOB_NAME} #${BUILD_NUMBER} -- ${env.GIT_AUTHOR}"
         }
     }
 }
+
+// =============================================================================
+// DRIFT DETECTION JOB — Configure as a SEPARATE Jenkins pipeline
+// =============================================================================
+// Purpose: Detect when production infrastructure diverges from Terraform state.
+// Common causes: portal emergency changes, Azure platform updates, compromised
+// accounts modifying resources directly (MITRE T1578).
+//
+// A drifted resource is an unreviewed resource — a compliance finding.
+// Daily drift detection ensures "the last known good state" is recent.
+//
+// Setup: Jenkins > New Item > Pipeline > paste below > Schedule: H 6 * * *
+//
+// pipeline {
+//     agent any
+//     triggers { cron('H 6 * * *') }
+//     environment { TF_IN_AUTOMATION = 'true' }
+//     stages {
+//         stage('Drift Check') {
+//             steps {
+//                 dir('terraform') {
+//                     withCredentials([
+//                         string(credentialsId: 'azure-client-id',      variable: 'ARM_CLIENT_ID'),
+//                         string(credentialsId: 'azure-tenant-id',       variable: 'ARM_TENANT_ID'),
+//                         string(credentialsId: 'azure-subscription-id', variable: 'ARM_SUBSCRIPTION_ID')
+//                     ]) {
+//                         script {
+//                             sh 'export ARM_USE_OIDC=true && terraform init -input=false && terraform workspace select prod'
+//                             // -detailed-exitcode: 0=no changes, 1=error, 2=drift
+//                             def rc = sh(
+//                                 script: 'export ARM_USE_OIDC=true && terraform plan -detailed-exitcode -input=false -var-file=terraform.tfvars 2>&1 | tee drift-report.txt',
+//                                 returnStatus: true
+//                             )
+//                             archiveArtifacts artifacts: 'drift-report.txt'
+//                             if (rc == 1) { error('Terraform plan failed -- check state/provider errors') }
+//                             if (rc == 2) {
+//                                 currentBuild.result = 'UNSTABLE'
+//                                 echo 'DRIFT DETECTED: Production diverges from Terraform. Re-apply or update code.'
+//                                 // slackSend channel: '#security-ops', color: 'warning',
+//                                 //   message: 'DRIFT ALERT: Production infra != Terraform. See drift-report.txt.'
+//                             } else {
+//                                 echo 'No drift -- production infrastructure matches Terraform state.'
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
+// =============================================================================

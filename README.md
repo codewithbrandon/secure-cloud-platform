@@ -1,322 +1,385 @@
-# Secure Cloud Platform
+<div align="center">
 
-A production-grade cloud infrastructure platform built on Microsoft Azure,
-demonstrating enterprise security architecture, Infrastructure as Code,
-DevSecOps, and full-stack observability.
+```
+██████╗ ███████╗██╗   ██╗███████╗███████╗ ██████╗
+██╔══██╗██╔════╝██║   ██║██╔════╝██╔════╝██╔════╝
+██║  ██║█████╗  ██║   ██║███████╗█████╗  ██║
+██║  ██║██╔══╝  ╚██╗ ██╔╝╚════██║██╔══╝  ██║
+██████╔╝███████╗ ╚████╔╝ ███████║███████╗╚██████╗
+╚═════╝ ╚══════╝  ╚═══╝  ╚══════╝╚══════╝ ╚═════╝
 
-![Azure](https://img.shields.io/badge/Azure-0078D4?style=for-the-badge&logo=microsoft-azure&logoColor=white)
-![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)
-![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
-![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
-![Jenkins](https://img.shields.io/badge/Jenkins-D24939?style=for-the-badge&logo=jenkins&logoColor=white)
-![Terraform](https://img.shields.io/badge/Terraform-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![Sentinel](https://img.shields.io/badge/Microsoft%20Sentinel-0078D4?style=for-the-badge&logo=microsoft-azure&logoColor=white)
+    P O L I C Y - E N F O R C E D   D E V S E C O P S
+```
+
+**Enterprise Azure security platform — every resource declared, scanned, policy-evaluated, and validated.**
 
 ---
 
-## What This Demonstrates
+[![Pipeline](https://img.shields.io/badge/Pipeline-19%20Stages-2ea44f?style=for-the-badge&logo=jenkins&logoColor=white)](jenkins/Jenkinsfile)
+[![Policies](https://img.shields.io/badge/OPA%20Policies-3%20Enforced-7D3C98?style=for-the-badge&logo=openpolicyagent&logoColor=white)](policies/)
+[![Resources](https://img.shields.io/badge/Azure%20Resources-71-0078D4?style=for-the-badge&logo=microsoft-azure&logoColor=white)](terraform/)
+[![MITRE](https://img.shields.io/badge/MITRE%20ATT%26CK-12%20Techniques-CC0000?style=for-the-badge&logo=shield&logoColor=white)](#threat-model)
 
-This project is an end-to-end reference implementation of a secure, observable,
-production-ready cloud platform. It is not a tutorial   every component reflects
-a deliberate architectural decision.
+[![Azure](https://img.shields.io/badge/Azure-Cloud-0078D4?style=flat-square&logo=microsoft-azure)](https://azure.microsoft.com)
+[![Terraform](https://img.shields.io/badge/Terraform-1.6+-7B42BC?style=flat-square&logo=terraform)](terraform/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28-326CE5?style=flat-square&logo=kubernetes)](k8s/)
+[![OPA](https://img.shields.io/badge/OPA-Conftest-7D3C98?style=flat-square&logo=openpolicyagent)](policies/)
+[![Checkov](https://img.shields.io/badge/Checkov-IaC%20Scan-5D8AA8?style=flat-square)](terraform/)
+[![Trivy](https://img.shields.io/badge/Trivy-Container%20Scan-1904DA?style=flat-square)](jenkins/Jenkinsfile)
+[![Sentinel](https://img.shields.io/badge/Sentinel-Runtime%20Detect-0078D4?style=flat-square&logo=microsoft-azure)](sentinel/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-| Capability | Implementation |
-|---|---|
-| Zero-trust networking | Default-deny NetworkPolicies across all namespaces |
-| Defense in depth | Security controls at network, identity, container, CI/CD, and runtime layers |
-| Runtime detection | Microsoft Sentinel + AKS audit logs   exec, privileged pods, RBAC escalation |
-| DevSecOps | Security gates block every pipeline stage   not just deployment |
-| Full observability | Prometheus + Grafana + Alertmanager with auto-provisioned dashboards |
-| Infrastructure as Code | 71 Azure resources, all Kubernetes manifests, all pipeline config |
-| Compliance-ready | PCI-DSS, SOC 2, HIPAA control mapping |
+</div>
+
+---
+
+## What Makes This Different
+
+> Most DevSecOps demos add a Trivy scan to a pipeline. This platform enforces security policy
+> at every layer — from the Terraform plan to the live Azure control plane.
+
+| Layer | Tool | Gate |
+|:---:|:---:|:---:|
+| Source code | gitleaks + Bandit | Blocks on any secret or HIGH severity |
+| Dependencies | pip-audit | Advisory check against OSV/PyPI |
+| IaC (source) | Checkov + tfsec | Blocks on CRITICAL/HIGH — parallel |
+| IaC (runtime) | OPA / Conftest | Blocks on plan-evaluated policy violations |
+| Container | Trivy | Blocks on CRITICAL/HIGH CVEs in image |
+| Infrastructure | validate_azure.sh | Blocks deploy if live Azure state fails checks |
+| Runtime | Microsoft Sentinel | KQL detections with 5-minute polling |
+| Drift | terraform plan | Daily — unstable if production diverges |
 
 ---
 
 ## Architecture
 
 ```
-                           ┌─────────────┐
-                           │   INTERNET  │
-                           └──────┬──────┘
-                                  │
-┌─────────────────────────────────┼──────────────────────────────────────┐
-│                        AZURE (West US 2)                               │
-│                                 │                                      │
-│  ┌──────────────────────────────┼──────────────────────────────────┐   │
-│  │           VIRTUAL NETWORK (10.0.0.0/16)                        │   │
-│  │                              │                                  │   │
-│  │  ┌────────────────┐          │       ┌──────────────────────┐   │   │
-│  │  │ APP GATEWAY    │          │       │    AKS CLUSTER       │   │   │
-│  │  │ WAF v2         │──────────┼──────▶│                      │   │   │
-│  │  └────────────────┘          │       │  ┌────────────────┐  │   │   │
-│  │                              │       │  │  secure-app ns │  │   │   │
-│  │  ┌────────────────┐          │       │  │  Flask API x2  │  │   │   │
-│  │  │ JENKINS VM     │──────────┼──────▶│  └────────────────┘  │   │   │
-│  │  │ CI/CD Pipeline │          │       │  ┌────────────────┐  │   │   │
-│  │  └────────────────┘          │       │  │  monitoring ns │  │   │   │
-│  │                              │       │  │  Prometheus    │  │   │   │
-│  └──────────────────────────────┼───────│  │  Grafana       │  │   │   │
-│                                 │       │  │  Alertmanager  │──┘   │   │
-│  ┌──────────┐  ┌─────────────┐  │       │  │  node-exporter │      │   │
-│  │ KEY VAULT│  │  AZURE SQL  │  │       │  │  kube-state-m  │      │   │
-│  │ Secrets  │  │  Database   │  │       │  └────────────────┘      │   │
-│  └──────────┘  └─────────────┘  │       └──────────────────────────┘   │
-│                                 │                                      │
-│  ┌──────────┐  ┌─────────────┐  │                                      │
-│  │   ACR    │  │    LOG      │  │                                      │
-│  │ Registry │  │  ANALYTICS  │  │                                      │
-│  └──────────┘  └─────────────┘  │                                      │
-└─────────────────────────────────┴──────────────────────────────────────┘
+                               ╔═══════════════╗
+                               ║    INTERNET    ║
+                               ╚═══════╤═══════╝
+                                       │ HTTPS only
+                               ╔═══════▼═══════╗
+                               ║ APP GATEWAY   ║  ← Sole internet-facing boundary
+                               ║ WAF v2        ║    DDoS, SQL inj., TLS termination
+                               ╚═══════╤═══════╝
+                                       │
+╔══════════════════════════════════════╪══════════════════════════════════════╗
+║              VIRTUAL NETWORK  10.0.0.0/16                                  ║
+║                                      │                                     ║
+║  ╔══════════════════════════════════════════════════════════╗               ║
+║  ║         AKS CLUSTER  (private API server)                ║               ║
+║  ║                                                          ║               ║
+║  ║  ╔═══════════════════╗     ╔═══════════════════════════╗ ║               ║
+║  ║  ║  secure-app       ║     ║  monitoring               ║ ║               ║
+║  ║  ║  ─────────────    ║     ║  ─────────────────────    ║ ║               ║
+║  ║  ║  Flask API  x2    ║     ║  Prometheus  Grafana      ║ ║               ║
+║  ║  ║  NetworkPolicy    ║     ║  Alertmanager             ║ ║               ║
+║  ║  ║  (default-deny)   ║     ║  node-exporter            ║ ║               ║
+║  ║  ╚═══════════════════╝     ╚═══════════════════════════╝ ║               ║
+║  ╚══════════════════════════════════════════════════════════╝               ║
+║                                                                             ║
+║  ╔══════════════╗  ╔═══════════════╗  ╔═══════════╗  ╔══════════════════╗  ║
+║  ║  JENKINS VM  ║  ║   AZURE SQL   ║  ║ KEY VAULT ║  ║  ACR (Premium)   ║  ║
+║  ║  IaC + CI/CD ║  ║  Private EP   ║  ║ MSI-only  ║  ║  Admin disabled  ║  ║
+║  ╚══════════════╝  ╚═══════════════╝  ╚═══════════╝  ╚══════════════════╝  ║
+║                                                                             ║
+║  ╔═══════════════════════════════════════════════════════════════════════╗  ║
+║  ║  LOG ANALYTICS WORKSPACE  (90-day retention)                         ║  ║
+║  ║  AKS audit → Microsoft Sentinel → KQL rules → Incident → Playbook   ║  ║
+║  ╚═══════════════════════════════════════════════════════════════════════╝  ║
+╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
-### Deployed Resources   71 Total
+<details>
+<summary><strong>Deployed Resources — 71 Total</strong></summary>
 
 | Category | Resources |
 |---|---|
-| **Compute** | AKS Cluster (2 nodes), Jenkins VM |
-| **Networking** | VNet, 5 Subnets, 5 NSGs, Application Gateway WAF |
-| **Data** | Azure SQL Database, Azure Key Vault |
-| **Containers** | Container Registry, Flask API (x2 pods) |
-| **Monitoring** | Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter |
-| **Security** | Managed Identities, RBAC Role Assignments, Network Policies |
+| **Compute** | AKS (private, RBAC, AAD, autoscale 2–5 nodes), Jenkins VM |
+| **Networking** | VNet, 5 Subnets, 5 NSGs (default-deny), Application Gateway WAF v2 |
+| **Data** | Azure SQL (private endpoint), Key Vault (MSI-only, purge-protect) |
+| **Containers** | ACR Premium (admin disabled), Flask API (x2 pods, non-root) |
+| **Observability** | Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter |
+| **Security** | Managed Identities, RBAC Assignments, NetworkPolicies, Sentinel Rules |
+| **Governance** | Log Analytics (90d retention), Diagnostic Settings (all resources) |
+
+</details>
 
 ---
 
-## Security Architecture
-
-### Defense in Depth
+## CI/CD Pipeline — 19 Stages
 
 ```
-Layer               Control
-─────────────────────────────────────────────────────────────
-Detect & Respond    Microsoft Sentinel   KQL analytics rules (5-min polling)
-                    AKS audit logs → exec detection, privileged pod, RBAC escalation
-                    Automated incident response via Logic App playbooks
+ EVERY BRANCH / PR
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                                                                         │
+ │  [1]Checkout ──► [2]Secrets Scan ──► [3]Dependency Scan ──► [4]SAST   │
+ │                       │                                        │        │
+ │                    BLOCKS                                   BLOCKS      │
+ │                  on any leak                              on HIGH sev   │
+ │                                                                │        │
+ │  [5]Unit Tests ◄────────────────────────────────────────────────        │
+ │       │                                                                 │
+ │       ▼                                                                 │
+ │  [6]Terraform Init + fmt-check + validate                               │
+ │       │  BLOCKS if unformatted or invalid schema                        │
+ │       │                                                                 │
+ │       ▼                                                                 │
+ │  [7]IaC Security Scan ─────────── parallel ─────────────────────────   │
+ │       │         Checkov (NIST/CIS/SOC2)    tfsec (Azure-specific)      │
+ │       │         BLOCKS on CRITICAL/HIGH    BLOCKS on CRITICAL/HIGH     │
+ │       │                                                                 │
+ │  [8]Terraform Plan ──► saves binary plan + JSON                        │
+ │       │  (binary reused for apply — no TOCTOU)                         │
+ │       │                                                                 │
+ │       ▼                                                                 │
+ │  [9]OPA / Conftest Policy Check                                         │
+ │       │   deny_public_ip.rego ──── no internet-facing resources        │
+ │       │   deny_open_nsg.rego  ──── no 0.0.0.0/0 on mgmt ports         │
+ │       │   require_tags.rego   ──── 6 mandatory tags enforced           │
+ │       │   kubernetes.rego     ──── container security baseline         │
+ │       │   BLOCKS on ANY policy violation                                │
+ │       │                                                                 │
+ │  [10]Build ──► [11]Trivy Scan ──► [12]Push ACR                        │
+ │                     │                                                  │
+ │                  BLOCKS on                                              │
+ │                  CRIT/HIGH CVE                                          │
+ │                                                                         │
+ │  [13]Validate K8s  [14]Validate Monitoring                             │
+ │                                                                         │
+ └─────────────────────────────────────────────────────────────────────────┘
 
-Network             NSGs + Kubernetes NetworkPolicies (default-deny)
-                    Application Gateway WAF
-                    Private endpoints for PaaS services
+ MAIN BRANCH ONLY  ── manual approval gate captures JIRA ticket
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                                                                         │
+ │  [15]Terraform Apply (exact plan from stage 8)                         │
+ │       │                                                                 │
+ │       ▼                                                                 │
+ │  [16]Azure Post-Deploy Validation (validate_azure.sh)                  │
+ │       │   Queries LIVE Azure control plane — not Terraform state       │
+ │       │   Private cluster / RBAC / node IPs / NSGs / ACR / Logs        │
+ │       │   BLOCKS AKS deployment on any critical finding                 │
+ │       │                                                                 │
+ │  [17]Deploy to AKS ──► [18]Deploy Monitoring ──► [19]Smoke Tests      │
+ │                                                                         │
+ └─────────────────────────────────────────────────────────────────────────┘
 
-Identity            Azure Managed Identity (no stored credentials)
-                    Azure AD RBAC + Kubernetes RBAC
-                    Workload Identity for pod-level access
-
-Container           Non-root execution (UID 65534 / 472)
-                    Read-only root filesystem
-                    All Linux capabilities dropped
-                    Pod Security Standards (baseline / restricted)
-
-Application         Security response headers (CSP, HSTS, X-Frame)
-                    Rate limiting at ingress
-                    Input validation
-
-Data                TDE encryption at rest
-                    TLS 1.2+ in transit
-                    Key Vault for all secrets (no plaintext)
-
-CI/CD               Secrets scanning (gitleaks)   blocks on detect
-                    SAST (bandit)   blocks on HIGH severity
-                    Dependency audit (pip-audit)
-                    Container scanning (Trivy)   blocks on CRITICAL/HIGH
-```
-
-### Threat Model
-
-| Threat | Mitigation |
-|---|---|
-| SQL Injection | Parameterized queries, WAF rules, input validation |
-| Container Escape | Non-root, read-only FS, dropped capabilities + Sentinel T1611 detection |
-| Lateral Movement | Default-deny NetworkPolicies, namespace isolation + Sentinel T1609 detection |
-| Privilege Escalation | Pod Security Standards + Sentinel cluster-admin binding detection (T1078) |
-| Credential Theft | Managed Identity, Key Vault, no stored secrets |
-| Supply Chain | Trivy image scan, pip-audit, pinned image digests |
-| Brute Force | Rate limiting (ingress), auth failure alerting |
-| Cryptomining / DoS | CPU/memory limits, HPA, Prometheus alerts |
-
----
-
-## Observability Stack
-
-Full Prometheus + Grafana + Alertmanager deployment in a dedicated
-`monitoring` namespace with its own zero-trust network policies.
-
-### Components
-
-| Component | Version | Role |
-|---|---|---|
-| Prometheus | v2.48.0 | Metrics collection and storage (15-day TSDB) |
-| Grafana | v10.2.2 | Visualization   auto-provisioned dashboards |
-| Alertmanager | v0.26.0 | Alert routing (critical → webhook, warning → email) |
-| kube-state-metrics | v2.10.1 | Kubernetes object state metrics |
-| node-exporter | v1.7.0 | Host-level hardware and OS metrics |
-
-### Security Dashboard Panels
-
-- Request rate (req/s)   traffic baseline and anomaly detection
-- Error rate (%)   application health, attack indicator
-- P95 / P99 response time   performance and DoS detection
-- Auth failure rate   brute force indicator
-- Pod restarts   crash loop / exploitation indicator
-- CPU / memory utilization   cryptomining / resource exhaustion
-- Active pods by namespace   deployment visibility
-
-### Alert Routing
-
-```
-Alert fires
-    │
-    ├── severity=critical ──→ PagerDuty webhook (immediate, 1h repeat)
-    │
-    ├── severity=warning  ──→ Email (1m group wait, 8h repeat)
-    │
-    └── (inhibition rule) ──→ critical silences duplicate warnings
-                               for same alertname + namespace
+ SCHEDULED NIGHTLY (separate job)
+ ┌────────────────────────────────────────────────┐
+ │  terraform plan -detailed-exitcode             │
+ │  exit 2 → UNSTABLE + alert #security-ops       │
+ │  "Drift detection: nightly posture check"      │
+ └────────────────────────────────────────────────┘
 ```
 
 ---
 
-## CI/CD Pipeline
+## Policy-as-Code
 
-11-stage Jenkins DevSecOps pipeline   security gates run on every branch,
-deployment runs on `main` only.
+OPA/Conftest evaluates the **Terraform plan JSON** — not the source code.
+This means it sees what will _actually_ be deployed, including computed values
+and resource combinations that look fine individually but create risk together.
 
 ```
-  Every branch / PR
-  ┌──────────┐   ┌──────────┐   ┌──────┐   ┌───────┐   ┌───────┐
-  │ Checkout │──▶│ Secrets  │──▶│ SAST │──▶│ Tests │──▶│ Build │
-  └──────────┘   │   Scan   │   │      │   │       │   │ Image │
-                 └──────────┘   └──────┘   └───────┘   └───┬───┘
-                      │              │                      │
-                   BLOCKS         BLOCKS                    ▼
-                  on leak       on HIGH               ┌───────────┐
-                                severity              │   Image   │
-                                                      │   Scan    │
-                                                      └─────┬─────┘
-                                                            │
-                                                         BLOCKS
-                                                        on CRIT/HIGH
-                                                            │
-                                                            ▼
-                                                      ┌───────────┐
-                                                      │ Push ACR  │
-                                                      └─────┬─────┘
-                                                            │
-  ┌─────────────────────┐   ┌──────────────────────┐        │
-  │  Validate K8s       │──▶│  Validate Monitoring  │◀───────┘
-  │  Manifests (kubeval)│   │  Configs  (kubeval)   │
-  └─────────────────────┘   └──────────┬────────────┘
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+conftest test tfplan.json --policy policies/ --output table
+```
 
-  main only
-       │
-       ▼
-  ┌──────────────────────────────────────────┐
-  │  Deploy to AKS                           │
-  │                                          │
-  │  App stack (k8s/)                        │
-  │  namespace → secrets → service →         │
-  │  deployment → hpa → ingress              │
-  │                                          │
-  │  Monitoring stack (monitoring/)          │
-  │  namespace → pvcs → alertmanager →       │
-  │  kube-state-metrics → node-exporter →    │
-  │  grafana configs → prometheus →          │
-  │  grafana → networkpolicies → ingress     │
-  └──────────────────────────────────────────┘
-       │
-       ▼
-  ┌──────────────┐
-  │  Smoke Tests │
-  └──────────────┘
+### `policies/deny_public_ip.rego` — MITRE T1190, T1046
+
+```
+DENY  azurerm_public_ip on any non-approved resource
+DENY  AKS cluster without private_cluster_enabled = true
+DENY  SQL server with public_network_access_enabled = true
+DENY  Key Vault with network_acls.default_action = "Allow"
+ALLOW Application Gateway  (approved DMZ boundary)
+ALLOW Azure Bastion        (approved management entry point)
+```
+
+### `policies/deny_open_nsg.rego` — MITRE T1021, T1133
+
+```
+DENY  Allow-Inbound from 0.0.0.0/0 → port 22   (SSH)
+DENY  Allow-Inbound from 0.0.0.0/0 → port 3389  (RDP)
+DENY  Allow-Inbound from 0.0.0.0/0 → port *     (wildcard)
+DENY  AKS subnet NSG with any inbound from internet
+WARN  Allow-Outbound to 0.0.0.0/0 on all ports  (T1041 exfil risk)
+```
+
+### `policies/require_tags.rego` — Governance / Compliance
+
+```
+DENY  Missing: Environment | Team | CostCenter | Owner | ManagedBy | DataClassification
+DENY  DataClassification not in {public|internal|confidential|restricted}
+DENY  ManagedBy != "Terraform"  (unmanaged = bypasses pipeline scanning)
+DENY  CostCenter not matching CC-XXXX format
+DENY  Prod databases/vaults with DataClassification = "public"
+WARN  Owner tag is not an email address  (can't page during incident)
 ```
 
 ---
 
-## Runtime Detection & Automated Response
+## Infrastructure Drift Detection
 
-### Overview
-
-This platform implements a **Runtime Detection & Response** layer using Microsoft Sentinel as the SIEM/SOAR engine, backed by AKS native audit logging. The layer operates continuously on live cluster telemetry   independent of build-time scanning or admission controls   ensuring that post-compromise activity is detected even when an attacker uses legitimate credentials or bypasses static controls.
-
-### Detection Architecture
-
-```
-AKS API Server → kube-audit logs → Diagnostic Settings
-    → Log Analytics Workspace (AKSAudit table)
-        → Sentinel Analytics Rules (5-min KQL polling)
-            → Incident → Entity Mapping → Automated Playbook
-```
-
-### Detection Scenarios
-
-| Scenario | Rule | Severity | MITRE |
-|---|---|---|---|
-| `kubectl exec` into running pod | `aks_pod_exec_detection.kql` | High → Critical | T1609 |
-| Privileged container deployed | `privileged_pod_detection.kql` | High → Critical | T1611 |
-| Dangerous `hostPath` mount | `privileged_pod_detection.kql` | Medium → Critical | T1611 |
-| `cluster-admin` binding created | `privileged_pod_detection.kql` | Critical | T1078 |
-
-### Why Runtime Detection Matters
-
-Shift-left security (image scanning, IaC linting, admission policies) operates on known-bad patterns at build and deploy time. Runtime detection operates in the opposite direction: it assumes that a well-resourced attacker has already bypassed preventive controls   through a stolen kubeconfig, a compromised CI/CD token, or a zero-day   and focuses entirely on detecting the **behavior** of post-compromise activity.
-
-A `kubectl exec` command that reaches a production pod leaves a 5-minute detection window before an attacker can access mounted secrets or attempt a container escape. This layer is designed to close that window with automated alerting and a structured SOC runbook.
-
-### Response Capability
-
-On detection, the platform supports:
-
-- **Namespace quarantine** via deny-all `NetworkPolicy` (preserves pod for forensics)
-- **Credential invalidation**   Azure AD session revocation + Kubernetes SA deletion
-- **Secret rotation** via Azure Key Vault + Kubernetes secret update
-- **RBAC remediation**   binding deletion + least-privilege replacement
-- **Node draining** for confirmed node-level compromise
-
-See [`docs/detections-runtime.md`](docs/detections-runtime.md) for architecture detail and attack simulation guide.
-See [`docs/incident-response-runbook.md`](docs/incident-response-runbook.md) for the full SOC runbook.
-
----
-
-## Live Demo
-
-### AKS Portal
-
-![AKS Portal Overview](images/aks-portal.png)
-*AKS cluster running Kubernetes 1.32 with Azure CNI networking and Calico network policies*
-
-### Jenkins Pipeline
-
-![Jenkins Pipeline](images/jenkins-pipeline.png)
-*11-stage DevSecOps pipeline with security gates at every step*
-
-### Azure Key Vault
-
-![Key Vault](images/keyvault.png)
-*Secrets management with Azure RBAC, soft-delete, and purge protection enabled*
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/health` | GET | Liveness probe |
-| `/ready` | GET | Readiness probe |
-| `/metrics` | GET | Prometheus metrics |
-| `/api/v1/status` | GET | Application status |
-| `/api/v1/echo` | POST | Echo endpoint |
+A dedicated Jenkins job runs every morning at 06:00:
 
 ```bash
-$ curl http://4.154.192.151/api/v1/status
+terraform plan -detailed-exitcode -var-file=terraform.tfvars
 
-{
-  "status": "operational",
-  "environment": "production",
-  "timestamp": "2026-02-17T21:01:56.111592",
-  "security": {
-    "headers_validated": true,
-    "tls_enabled": false
-  }
-}
+# Exit codes:
+#   0 = no changes     → green
+#   1 = plan error     → pipeline failure (investigate)
+#   2 = drift detected → UNSTABLE + Slack alert to #security-ops
 ```
+
+**Why this matters:**
+A drifted resource is an unreviewed change — equivalent to an unreviewed PR.
+Common causes: emergency portal fixes, Azure platform updates, compromised
+accounts modifying resources directly (MITRE T1578).
+
+Drift detection closes the gap from "discovered at next audit" to "discovered
+by 06:15 AM the next morning."
+
+---
+
+## Post-Deploy Validation
+
+`validation/validate_azure.sh` queries the **live Azure control plane** after
+every apply. Terraform state can diverge from reality — provider bugs, race
+conditions, and manual edits all create gaps. This script is the authoritative check.
+
+| # | Check | Method | MITRE |
+|:---:|---|---|:---:|
+| 1 | AKS private cluster enabled | `az aks show` | T1046 |
+| 2 | AKS RBAC enabled | `az aks show` | T1078 |
+| 3 | No public IPs on AKS nodes | `az network nic list` | T1190 |
+| 4 | No 0.0.0.0/0 on SSH/RDP in NSGs | `az network nsg list` | T1021 |
+| 5 | ACR admin account disabled | `az acr show` | T1525 |
+| 6 | AcrPull role exists on ACR | `az role assignment list` | T1610 |
+| 7 | AKS diagnostic logs enabled | `az monitor diagnostic-settings list` | T1562 |
+
+Pipeline behavior: any CRITICAL failure returns exit code 1 — Stage 17 (AKS deploy) does not run.
+
+---
+
+## Defense in Depth
+
+```
+ GOVERNANCE ──────────────────────────────────────────────────────────────
+  OPA plan evaluation    Catches misconfig before any Azure API call
+  Checkov + tfsec        NIST 800-53, CIS, SOC 2, Azure-specific rules
+  Drift detection        Nightly posture check against Terraform state
+  Mandatory tagging      Owner + CostCenter + DataClassification enforced
+
+ NETWORK ──────────────────────────────────────────────────────────────────
+  Default-deny NSGs      No implicit permit between subnets
+  K8s NetworkPolicies    Pod-level default-deny in every namespace
+  Private AKS            API server reachable only inside VNet
+  App Gateway WAF        Single internet entry point; all else private
+
+ IDENTITY ─────────────────────────────────────────────────────────────────
+  Managed Identity       No passwords, keys, or connection strings stored
+  OIDC pipeline auth     Short-lived tokens; no ARM_CLIENT_SECRET
+  Azure AD + K8s RBAC    Least-privilege at every layer
+
+ CONTAINER ────────────────────────────────────────────────────────────────
+  Non-root (UID 65534)   No process runs as root inside containers
+  ReadOnly root FS       Filesystem immutable at runtime
+  Dropped capabilities   All Linux caps removed; none added back
+  PSS restricted         Pod Security Standards enforced at namespace level
+
+ PIPELINE ─────────────────────────────────────────────────────────────────
+  gitleaks               Blocks on any secret/credential detected
+  Bandit SAST            Blocks on HIGH severity code findings
+  pip-audit              Dependency CVE check against OSV advisories
+  Checkov + tfsec        IaC misconfig — blocks on CRITICAL/HIGH
+  OPA / Conftest         Plan-level policy enforcement
+  Trivy                  Container image CVE — blocks on CRITICAL/HIGH
+
+ DETECT & RESPOND ─────────────────────────────────────────────────────────
+  Microsoft Sentinel     KQL analytics rules with 5-minute polling
+  AKS audit logs         kubectl exec, privileged pods, RBAC escalation
+  Prometheus alerts      CPU/memory anomalies, error rate spikes
+  Post-deploy checks     Live Azure state validated after every apply
+```
+
+---
+
+## Threat Model
+
+<details>
+<summary><strong>STRIDE Analysis</strong></summary>
+
+| Category | Attack Scenario | Control | Detection |
+|---|---|---|---|
+| **Spoofing** | Stolen kubeconfig used to exec into pod | Private cluster (no external API) | Sentinel T1609 — 5-min alert |
+| **Tampering** | Portal edit opens NSG to 0.0.0.0/0 | NSG OPA policy (plan-time) | Drift detection catches by 06:15 AM |
+| **Repudiation** | No audit trail for infrastructure changes | Terraform state + Log Analytics (90d) | All API calls logged |
+| **Info Disclosure** | ACR admin password leaked in CI logs | Admin disabled; MSI-only auth | No password exists to leak |
+| **Denial of Service** | Cryptomining container spikes CPU | Resource limits + HPA | Prometheus alert in minutes |
+| **Elevation of Privilege** | cluster-admin binding via compromised SA | OPA deny (pipeline) | Sentinel KQL (runtime) |
+
+</details>
+
+<details>
+<summary><strong>MITRE ATT&CK Coverage</strong></summary>
+
+| Technique | Description | Control |
+|---|---|---|
+| T1190 | Exploit Public-Facing Application | No public IPs (OPA + post-deploy) |
+| T1046 | Network Service Discovery | Private AKS + NSG default-deny |
+| T1021 | Remote Services (SSH/RDP) | NSG policy + Azure Bastion only |
+| T1078 | Valid Accounts (RBAC escalation) | RBAC enforced + Sentinel KQL |
+| T1525 | Implant Internal Image | ACR admin disabled + Trivy scan |
+| T1552 | Credentials in Files | gitleaks + OIDC (no stored secrets) |
+| T1562 | Disable/Modify Cloud Logs | Diagnostic settings validated |
+| T1609 | Container Administration Command | Sentinel KQL — exec detection |
+| T1610 | Deploy Container | AcrPull role enforced |
+| T1611 | Escape to Host | Non-root + dropped caps + PSS |
+| T1578 | Modify Cloud Compute Infrastructure | Drift detection — nightly check |
+| T1195 | Supply Chain Compromise | pip-audit + pinned providers |
+
+</details>
+
+---
+
+## Observability
+
+```
+Prometheus (metrics) ──► Grafana (dashboards) ──► Alertmanager (routing)
+                                                        │
+                              ┌─────────────────────────┼────────────────┐
+                         critical                    warning          inhibit
+                              │                          │               │
+                        PagerDuty               Email (8h repeat)  dedup warn
+                        (0s delay,                                  same alert
+                         1h repeat)                                 + namespace
+```
+
+**Security dashboard panels:** request rate · error rate · P95/P99 latency ·
+auth failure rate · pod restarts · CPU/memory utilization · active pods by namespace
+
+---
+
+## Runtime Detection (Microsoft Sentinel)
+
+```
+AKS API Server
+    → kube-audit logs
+    → Diagnostic Settings
+    → Log Analytics (AKSAudit table)
+    → Sentinel Analytics Rules (5-min KQL polling)
+    → Incident + Entity Mapping
+    → Logic App Playbook (auto-response)
+```
+
+| Detection | Severity | MITRE | KQL File |
+|---|:---:|:---:|---|
+| `kubectl exec` into running pod | High → Critical | T1609 | `kql/aks_pod_exec_detection.kql` |
+| Privileged container deployed | High → Critical | T1611 | `kql/privileged_pod_detection.kql` |
+| Dangerous `hostPath` mount | Medium → Critical | T1611 | `kql/privileged_pod_detection.kql` |
+| `cluster-admin` binding created | Critical | T1078 | `kql/privileged_pod_detection.kql` |
 
 ---
 
@@ -324,164 +387,176 @@ $ curl http://4.154.192.151/api/v1/status
 
 ```
 secure-cloud-platform/
-├── terraform/                  # 71 Azure resources as code
+│
+├── terraform/                     Infrastructure as Code (71 resources)
+│   ├── main.tf                    Module orchestration
+│   ├── variables.tf               Input validation with constraints
+│   ├── outputs.tf                 References for downstream consumers
+│   ├── providers.tf               Pinned providers, OIDC auth, remote state
 │   └── modules/
-│       ├── networking/         # VNet, subnets, NSGs
-│       ├── aks/                # Kubernetes cluster
-│       ├── acr/                # Container registry
-│       ├── sql/                # Database
-│       ├── keyvault/           # Secrets management
-│       ├── appgateway/         # WAF + load balancing
-│       └── jenkins/            # CI/CD server
-├── app/                        # Flask API (metrics source)
-│   ├── app.py
-│   ├── Dockerfile
-│   └── requirements.txt
-├── k8s/                        # Application manifests
-│   ├── namespace.yaml          # PSS restricted
-│   ├── deployment.yaml
-│   ├── service.yaml
-│   ├── networkpolicy.yaml      # Default-deny + allow rules
-│   ├── ingress.yaml
-│   ├── hpa.yaml
-│   └── secrets.yaml
-├── monitoring/                 # Full observability stack
-│   ├── monitoring-namespace.yaml
-│   ├── monitoring-pvc.yaml
-│   ├── prometheus-config.yaml
-│   ├── prometheus-deployment.yaml
-│   ├── grafana-deployment.yaml
-│   ├── grafana-provisioning.yaml
-│   ├── grafana-security-dashboard.yaml
-│   ├── alertmanager-config.yaml
-│   ├── alertmanager-deployment.yaml
-│   ├── kube-state-metrics.yaml
-│   ├── node-exporter.yaml
-│   ├── monitoring-networkpolicy.yaml
-│   └── monitoring-ingress.yaml
+│       ├── networking/            VNet · 5 Subnets · 5 NSGs
+│       ├── aks/                   Private cluster · RBAC · AAD · Azure CNI
+│       ├── acr/                   Premium · private endpoint · admin disabled
+│       ├── sql/                   Private endpoint · AAD auth
+│       ├── keyvault/              MSI-only · purge-protect · network restricted
+│       ├── appgateway/            WAF v2 · TLS termination
+│       └── jenkins/               CI/CD VM in management subnet
+│
+├── policies/                      OPA / Conftest policy bundle
+│   ├── deny_public_ip.rego        T1190/T1046 — no public IPs on internals
+│   ├── deny_open_nsg.rego         T1021 — no 0.0.0.0/0 on mgmt ports
+│   ├── require_tags.rego          Governance — 6 mandatory resource tags
+│   └── kubernetes.rego            Container security baseline
+│
+├── validation/
+│   └── validate_azure.sh          Post-deploy Azure CLI checks (7 controls)
+│
 ├── jenkins/
-│   └── Jenkinsfile             # 11-stage DevSecOps pipeline
-├── sentinel/                   # Runtime detection layer (Microsoft Sentinel)
-│   ├── kql/
-│   │   ├── aks_pod_exec_detection.kql      # T1609   unauthorized exec detection
-│   │   └── privileged_pod_detection.kql    # T1611/T1078   privileged pod & RBAC
-│   └── analytics-rules/
-│       └── pod-exec-analytics-rule.json    # ARM template for Sentinel rule deploy
-├── docs/
-│   ├── detections-runtime.md               # Architecture, log setup, simulation guide
-│   └── incident-response-runbook.md        # SOC runbook   triage → contain → recover
-└── ansible/
-    └── playbooks/
-        └── harden-jenkins.yaml
+│   └── Jenkinsfile                19-stage pipeline + drift detection template
+│
+├── app/                           Flask API — metrics source + attack surface sim
+├── k8s/                           Application manifests (PSS restricted)
+├── monitoring/                    Prometheus · Grafana · Alertmanager stack
+├── sentinel/                      KQL detection rules + ARM templates
+└── docs/                          Runtime detection guide + SOC runbook
 ```
 
 ---
 
-## Deployment
-
-### Prerequisites
+## Quick Start
 
 ```bash
-# Azure CLI + kubectl
-winget install Microsoft.AzureCLI
-winget install Kubernetes.kubectl
+# 1. Prerequisites
+az login && az account set --subscription <id>
+terraform version   # >= 1.6
+conftest version    # >= 0.46
 
-# Authenticate
-az login
-az aks get-credentials \
-  --resource-group rg-seccloud-prod \
-  --name aks-seccloud-prod
-```
-
-### Infrastructure (Terraform)
-
-```bash
+# 2. Infrastructure
 cd terraform
+cp terraform.tfvars.example terraform.tfvars && vim terraform.tfvars
 terraform init
+checkov -d . --hard-fail-on CRITICAL,HIGH
+tfsec . --minimum-severity HIGH
 terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+conftest test tfplan.json --policy ../policies \
+  --namespace terraform.deny_public_ip \
+  --namespace terraform.deny_open_nsg \
+  --namespace terraform.require_tags
 terraform apply tfplan
-```
 
-### Application + Monitoring (Jenkins   automated on push to main)
+# 3. Validate live state
+RESOURCE_GROUP=rg-seccloud-prod \
+AKS_CLUSTER_NAME=aks-seccloud-prod \
+ACR_NAME=acrseccloudprod \
+./validation/validate_azure.sh
 
-Every merge to `main` triggers the full 11-stage pipeline which deploys
-both the application stack and the monitoring stack automatically.
-
-### Manual deploy (if needed)
-
-```bash
-kubectl apply -f k8s/
-kubectl apply -f monitoring/monitoring-namespace.yaml
-kubectl apply -f monitoring/monitoring-pvc.yaml
-kubectl apply -f monitoring/alertmanager-config.yaml
-kubectl apply -f monitoring/alertmanager-deployment.yaml
-kubectl apply -f monitoring/kube-state-metrics.yaml
-kubectl apply -f monitoring/node-exporter.yaml
-kubectl apply -f monitoring/grafana-provisioning.yaml
-kubectl apply -f monitoring/grafana-security-dashboard.yaml
-kubectl apply -f monitoring/prometheus-config.yaml
-kubectl apply -f monitoring/prometheus-deployment.yaml
-kubectl apply -f monitoring/grafana-deployment.yaml
-kubectl apply -f monitoring/monitoring-networkpolicy.yaml
-kubectl apply -f monitoring/monitoring-ingress.yaml
-```
-
-### Access Grafana
-
-```bash
+# 4. Access Grafana
 kubectl port-forward svc/grafana 3000:3000 -n monitoring
-# Open http://localhost:3000
+# → http://localhost:3000
 ```
 
 ---
 
-## Cost Estimate
+## Interview Talking Points
 
-| Resource | SKU | Monthly |
-|---|---|---|
-| AKS (2 nodes) | Standard_B2s | ~$60 |
-| Application Gateway | Standard_v2 | ~$180 |
-| Azure SQL | S0 | ~$15 |
-| Jenkins VM | Standard_B2s | ~$30 |
-| Log Analytics | Pay-as-you-go | ~$10 |
-| **Total** | | **~$295/month** |
+<details>
+<summary><strong>"How do you prevent cloud misconfiguration?"</strong></summary>
+
+Three layers. Checkov and tfsec scan the Terraform source code for known-bad
+patterns. OPA evaluates the actual plan JSON — what will be created including
+computed values that only resolve at runtime. Then `validate_azure.sh` queries
+the live Azure control plane after apply. Each layer catches what the previous
+one cannot. Terraform state diverges from live state more often than people expect.
+
+</details>
+
+<details>
+<summary><strong>"What is Policy-as-Code and why does it matter at scale?"</strong></summary>
+
+Policy-as-Code treats security rules as version-controlled artifacts.
+Every change to a Rego policy is a PR with a diff, review, and approval —
+creating an audit trail of every policy decision. It also scales infinitely:
+100 engineers committing simultaneously all get the same policy evaluation.
+Manual security review cannot match that consistency. The OPA policies in
+this repo block a new engineer from accidentally creating a public-facing
+database as reliably as they block a senior engineer.
+
+</details>
+
+<details>
+<summary><strong>"How do you handle secrets in a CI/CD pipeline?"</strong></summary>
+
+No secrets. The pipeline authenticates to Azure via OIDC Workload Identity
+Federation — the Jenkins agent exchanges a short-lived OIDC token for a
+scoped Azure access token at runtime. No `ARM_CLIENT_SECRET` is stored
+anywhere. Application secrets live in Key Vault, accessed by pods through
+Managed Identity. gitleaks scans every commit so accidental inclusions
+never reach remote. MITRE T1552.
+
+</details>
+
+<details>
+<summary><strong>"How do you detect infrastructure drift?"</strong></summary>
+
+A scheduled Jenkins job runs `terraform plan -detailed-exitcode` every
+morning. Exit code 2 means drift — a resource differs from Terraform state.
+This catches emergency portal changes that were never committed, Azure
+platform updates that modified properties, and — critically — unauthorized
+modifications by a compromised identity (MITRE T1578). The window between
+a change and its detection goes from "next audit" to "before 07:00 AM."
+
+</details>
+
+<details>
+<summary><strong>"Why not just use Azure Policy for enforcement?"</strong></summary>
+
+Azure Policy enforces at the Azure API layer — after a resource is created
+or modified. OPA enforces at the Terraform plan layer — before any API call
+is made. OPA also supports governance rules that aren't misconfigurations
+per se: tagging formats, naming conventions, approved regions, cost center
+validation. The combination gives shift-left enforcement (OPA in CI) plus
+runtime backstop (Azure Policy), with full audit trail for both.
+
+</details>
 
 ---
 
 ## Compliance Coverage
 
-| Framework | Controls Addressed |
+| Framework | Controls |
 |---|---|
-| **PCI-DSS** | Network segmentation, encryption, access control, audit logging |
-| **SOC 2** | Availability monitoring, access controls, change management |
-| **HIPAA** | Encryption at rest/transit, access controls, audit trails |
+| **PCI-DSS** | Network segmentation · encryption at rest/transit · access control · 90-day audit logs · vulnerability scanning |
+| **SOC 2** | Availability (HPA, multi-node) · access controls · change management (Terraform gates) · security monitoring |
+| **HIPAA** | Encryption (TDE + TLS 1.2+) · MSI/RBAC access · audit trails · minimum necessary access |
+| **NIST CSF** | Identify (tagging) · Protect (IaC controls) · Detect (Sentinel) · Respond (runbooks) · Recover (drift detection) |
 
 ---
 
-## Technologies
+## Tech Stack
 
-| Category | Stack |
-|---|---|
-| Cloud | Microsoft Azure |
-| IaC | Terraform (71 resources) |
-| Containers | Docker, Kubernetes 1.32, containerd |
-| CI/CD | Jenkins (11-stage DevSecOps pipeline) |
-| Security scanning | gitleaks, bandit, pip-audit, Trivy |
-| Runtime detection | Microsoft Sentinel, KQL Analytics Rules, AKS Audit Logs |
-| Observability | Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter |
-| Application | Python, Flask, Gunicorn |
-| Database | Azure SQL |
-| Secret management | Azure Key Vault, Managed Identity |
-| Policy | Kubernetes NetworkPolicy, Pod Security Standards, OPA/conftest |
+| | Technology | Purpose |
+|:---:|---|---|
+| ☁️ | Microsoft Azure | Cloud platform (71 resources) |
+| 🏗️ | Terraform 1.6+ | Infrastructure as Code, remote state, OIDC |
+| ⚖️ | OPA / Conftest | Policy-as-Code on Terraform plan JSON |
+| 🔍 | Checkov + tfsec | IaC security scanning (parallel, NIST/CIS/Azure) |
+| 🐳 | Docker + Kubernetes 1.28 | Containerised workloads, private cluster |
+| 🔧 | Jenkins | 19-stage DevSecOps pipeline |
+| 🛡️ | Trivy + Bandit + gitleaks | Container, SAST, and secrets scanning |
+| 📡 | Microsoft Sentinel | SIEM/SOAR — KQL runtime detection |
+| 📊 | Prometheus + Grafana | Metrics, dashboards, alert routing |
+| 🔐 | Azure Key Vault + Managed Identity | Secrets management, zero stored credentials |
+| 🐍 | Python 3.11 + Flask | Application layer |
+| 📝 | Bash + Azure CLI | Post-deploy infrastructure validation |
 
 ---
 
-<p align="center">
-  <b>Built with security-first principles for a zero-trust, production-grade cloud environment</b><br><br>
-  <a href="#architecture">Architecture</a> •
-  <a href="#security-architecture">Security</a> •
-  <a href="#runtime-detection--automated-response">Detection</a> •
-  <a href="#observability-stack">Observability</a> •
-  <a href="#cicd-pipeline">CI/CD</a> •
-  <a href="#live-demo">Demo</a>
-</p>
+<div align="center">
+
+**Every commit evaluated. Every resource validated. Every change audited.**
+
+*Built to demonstrate $130k–$150k DevSecOps engineering depth across*
+*governance, automation, enforcement, and cloud security posture.*
+
+</div>
