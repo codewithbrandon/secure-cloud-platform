@@ -552,11 +552,4 @@ runtime backstop (Azure Policy), with full audit trail for both.
 
 ---
 
-<div align="center">
 
-**Every commit evaluated. Every resource validated. Every change audited.**
-
-*Built to demonstrate $130k–$150k DevSecOps engineering depth across*
-*governance, automation, enforcement, and cloud security posture.*
-
-</div>
